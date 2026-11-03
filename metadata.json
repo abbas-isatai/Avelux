@@ -1,0 +1,6 @@
+{
+  "name": "Avelux Grand",
+  "description": "Sleek Stockfish 19 game reviewer for Chess.com with centipawn loss classification, brilliant move detection, and dynamic eval bar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,287 @@
+const fs = require('fs');
+const path = require('path');
+const zlib = require('zlib');
+
+const publicDir = path.resolve(__dirname, '../public');
+if (!fs.existsSync(publicDir)) {
+  fs.mkdirSync(publicDir, { recursive: true });
+}
+
+// 1. Generate icon.svg
+const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <radialGradient id="bgGlow" cx="50%" cy="40%" r="65%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="60%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#050811"/>
+    </radialGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047"/>
+      <stop offset="45%" stop-color="#EAB308"/>
+      <stop offset="100%" stop-color="#CA8A04"/>
+    </linearGradient>
+    <linearGradient id="emeraldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="cyanGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#06B6D4"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background with subtle chessboard grid overlay -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGlow)"/>
+  <g opacity="0.06" stroke="#FFFFFF" stroke-width="2">
+    <line x1="64" y1="0" x2="64" y2="512"/>
+    <line x1="128" y1="0" x2="128" y2="512"/>
+    <line x1="192" y1="0" x2="192" y2="512"/>
+    <line x1="256" y1="0" x2="256" y2="512"/>
+    <line x1="320" y1="0" x2="320" y2="512"/>
+    <line x1="384" y1="0" x2="384" y2="512"/>
+    <line x1="448" y1="0" x2="448" y2="512"/>
+    <line x1="0" y1="64" x2="512" y2="64"/>
+    <line x1="0" y1="128" x2="512" y2="128"/>
+    <line x1="0" y1="192" x2="512" y2="192"/>
+    <line x1="0" y1="256" x2="512" y2="256"/>
+    <line x1="0" y1="320" x2="512" y2="320"/>
+    <line x1="0" y1="384" x2="512" y2="384"/>
+    <line x1="0" y1="448" x2="512" y2="448"/>
+  </g>
+
+  <!-- Outer Ring Accent -->
+  <rect x="20" y="20" width="472" height="472" rx="96" fill="none" stroke="url(#cyanGrad)" stroke-width="3" opacity="0.4"/>
+
+  <!-- Crown on Top -->
+  <path d="M196 142 L216 172 L256 128 L296 172 L316 142 L326 195 L186 195 Z" fill="url(#goldGrad)" filter="url(#glow)"/>
+  <circle cx="196" cy="138" r="7" fill="#FDE047"/>
+  <circle cx="256" cy="122" r="8" fill="#FDE047"/>
+  <circle cx="316" cy="138" r="7" fill="#FDE047"/>
+
+  <!-- Grand Knight Silhouette -->
+  <path d="M 230 190 
+           C 215 190, 185 205, 172 235 
+           C 160 262, 168 285, 186 300 
+           C 180 308, 172 322, 175 342 
+           C 180 365, 205 385, 205 385 
+           L 180 415 
+           L 332 415 
+           L 315 375 
+           C 315 375, 345 325, 345 285 
+           C 345 235, 305 190, 255 190 
+           Z" 
+        fill="url(#goldGrad)" />
+
+  <!-- Mane details & eye cutouts -->
+  <path d="M 270 215 C 310 245, 315 300, 310 340 L 295 325 C 298 280, 275 250, 250 235 Z" fill="#78350F" opacity="0.35"/>
+  <circle cx="218" cy="245" r="9" fill="#0B0F17"/>
+  <circle cx="220" cy="243" r="3" fill="#34D399"/>
+
+  <!-- Base Pedestal -->
+  <rect x="156" y="415" width="200" height="24" rx="10" fill="url(#goldGrad)"/>
+  <rect x="140" y="435" width="232" height="18" rx="8" fill="#B45309"/>
+
+  <!-- Modern Neon Gem / Brilliant Symbol on Crest -->
+  <polygon points="256,290 280,318 256,346 232,318" fill="url(#emeraldGrad)" filter="url(#glow)"/>
+  <polygon points="256,298 272,318 256,338 240,318" fill="#ECFDF5"/>
+
+  <!-- Text Badge at bottom -->
+  <text x="256" y="482" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="900" font-size="28" letter-spacing="4" fill="#38BDF8" text-anchor="middle">AVELUX GRAND</text>
+</svg>`;
+
+fs.writeFileSync(path.join(publicDir, 'icon.svg'), svgContent);
+
+// PNG encoder helper
+function makePNG(width, height, renderPixel) {
+  const crcTable = [];
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) {
+      if (c & 1) c = 0xedb88320 ^ (c >>> 1);
+      else c = c >>> 1;
+    }
+    crcTable[n] = c;
+  }
+  function crc32(buf) {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) {
+      c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    }
+    return (c ^ 0xffffffff) >>> 0;
+  }
+  function chunk(type, data) {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length, 0);
+    const typeBuf = Buffer.from(type, 'binary');
+    const body = Buffer.concat([typeBuf, data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body), 0);
+    return Buffer.concat([len, body, crc]);
+  }
+
+  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6; // RGBA
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  const rawRows = [];
+  for (let y = 0; y < height; y++) {
+    const row = Buffer.alloc(1 + width * 4);
+    row[0] = 0;
+    for (let x = 0; x < width; x++) {
+      const [r, g, b, a] = renderPixel(x, y, width, height);
+      const idx = 1 + x * 4;
+      row[idx] = r;
+      row[idx + 1] = g;
+      row[idx + 2] = b;
+      row[idx + 3] = a;
+    }
+    rawRows.push(row);
+  }
+  const idatData = zlib.deflateSync(Buffer.concat(rawRows));
+  return Buffer.concat([
+    sig,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', idatData),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+// Generate smooth chess-themed icons with knight silhouette and glowing gem
+function renderIconPixel(x, y, w, h, isMaskable) {
+  const nx = x / w; // 0 to 1
+  const ny = y / h; // 0 to 1
+  const cx = 0.5;
+  const cy = 0.48;
+  const dx = nx - cx;
+  const dy = ny - cy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  // Background gradient: dark obsidian to deep sapphire
+  let r = Math.round(11 + 15 * (1 - dist));
+  let g = Math.round(15 + 25 * (1 - dist));
+  let b = Math.round(23 + 45 * (1 - dist));
+  let a = 255;
+
+  // Board grid lines background
+  const gridX = Math.floor(nx * 8);
+  const gridY = Math.floor(ny * 8);
+  if ((gridX + gridY) % 2 === 1) {
+    r += 6;
+    g += 8;
+    b += 14;
+  }
+
+  // Cyan rim border on standard icons
+  if (!isMaskable) {
+    const borderMargin = 0.04;
+    if (nx < borderMargin || nx > 1 - borderMargin || ny < borderMargin || ny > 1 - borderMargin) {
+      if (nx > 0.02 && nx < 0.98 && ny > 0.02 && ny < 0.98) {
+        return [6, 182, 212, 180]; // cyan edge
+      }
+    }
+  }
+
+  // Golden Knight / Crown center symbol
+  // Crown: y around 0.22 - 0.32, x around 0.35 - 0.65
+  if (ny >= 0.22 && ny <= 0.30 && Math.abs(dx) <= 0.16) {
+    const crownSlope = Math.abs(dx) * 0.4;
+    if (ny >= 0.24 - crownSlope || Math.abs(dx) < 0.04) {
+      return [245, 158, 11, 255]; // gold
+    }
+  }
+
+  // Knight head & body: y around 0.30 - 0.75, x around 0.30 - 0.70
+  if (ny >= 0.30 && ny <= 0.72) {
+    const bodyW = 0.16 + (ny - 0.3) * 0.25;
+    if (Math.abs(dx) <= bodyW) {
+      // Brilliant cyan diamond in center
+      const gemDist = Math.abs(dx) * 2 + Math.abs(ny - 0.52) * 1.5;
+      if (gemDist < 0.12) {
+        return [52, 211, 153, 255]; // emerald/cyan brilliant core
+      }
+      if (gemDist < 0.18) {
+        return [16, 185, 129, 255];
+      }
+      // Golden knight body
+      const shade = 220 + Math.round(35 * (dx + 0.2));
+      return [Math.min(255, shade), Math.min(220, Math.round(shade * 0.8)), 30, 255];
+    }
+  }
+
+  // Base pedestal: y around 0.72 - 0.82
+  if (ny >= 0.72 && ny <= 0.80 && Math.abs(dx) <= 0.30) {
+    return [217, 119, 6, 255]; // base amber
+  }
+
+  return [r, g, b, a];
+}
+
+// Write PNG icons
+const icon192 = makePNG(192, 192, (x, y, w, h) => renderIconPixel(x, y, w, h, false));
+fs.writeFileSync(path.join(publicDir, 'pwa-192x192.png'), icon192);
+
+const icon512 = makePNG(512, 512, (x, y, w, h) => renderIconPixel(x, y, w, h, false));
+fs.writeFileSync(path.join(publicDir, 'pwa-512x512.png'), icon512);
+
+const iconMaskable = makePNG(512, 512, (x, y, w, h) => renderIconPixel(x, y, w, h, true));
+fs.writeFileSync(path.join(publicDir, 'pwa-maskable-512x512.png'), iconMaskable);
+
+const appleTouchIcon = makePNG(180, 180, (x, y, w, h) => renderIconPixel(x, y, w, h, false));
+fs.writeFileSync(path.join(publicDir, 'apple-touch-icon.png'), appleTouchIcon);
+
+const favicon = makePNG(32, 32, (x, y, w, h) => renderIconPixel(x, y, w, h, false));
+fs.writeFileSync(path.join(publicDir, 'favicon.ico'), favicon);
+
+// Write manifest.json
+const manifest = {
+  id: '/',
+  name: 'Avelux Grand - Stockfish 19 Chess Reviewer',
+  short_name: 'Avelux Grand',
+  description: 'Sleek chess game reviewer powered by Stockfish 19 with real-time centipawn loss classification, brilliant move detection, and dynamic eval bar.',
+  start_url: '/',
+  scope: '/',
+  display: 'standalone',
+  orientation: 'any',
+  background_color: '#0B0F17',
+  theme_color: '#0B0F17',
+  icons: [
+    {
+      src: '/pwa-192x192.png',
+      sizes: '192x192',
+      type: 'image/png',
+      purpose: 'any',
+    },
+    {
+      src: '/pwa-512x512.png',
+      sizes: '512x512',
+      type: 'image/png',
+      purpose: 'any',
+    },
+    {
+      src: '/pwa-maskable-512x512.png',
+      sizes: '512x512',
+      type: 'image/png',
+      purpose: 'maskable',
+    },
+    {
+      src: '/icon.svg',
+      sizes: '512x512',
+      type: 'image/svg+xml',
+      purpose: 'any',
+    },
+  ],
+};
+
+fs.writeFileSync(path.join(publicDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+
+console.log('Successfully generated all PWA icons, manifest, and assets!');
