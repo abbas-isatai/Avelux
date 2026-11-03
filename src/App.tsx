@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Chess } from 'chess.js';
 import { Header } from './components/Header';
+import { UsernameSearchBanner } from './components/UsernameSearchBanner';
 import { EvalBar } from './components/EvalBar';
 import { ChessBoard } from './components/ChessBoard';
 import { GameReviewPanel } from './components/GameReviewPanel';
-import { GameSelectorModal } from './components/GameSelectorModal';
 import { PWAInstallModal } from './components/PWAInstallModal';
 import { ChessComGame, GameReviewResult } from './types/chess';
 import { FEATURED_GAMES } from './services/chesscomApi';
@@ -13,6 +13,7 @@ import { sounds } from './services/soundEffects';
 
 export default function App() {
   const [selectedGame, setSelectedGame] = useState<ChessComGame>(FEATURED_GAMES[0]);
+  const [currentUsername, setCurrentUsername] = useState<string>('hikaru');
   const [reviewResult, setReviewResult] = useState<GameReviewResult | null>(null);
   const [currentPly, setCurrentPly] = useState<number>(0);
   const [isFlipped, setIsFlipped] = useState<boolean>(false);
@@ -20,15 +21,11 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [analysisProgress, setAnalysisProgress] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
-
-  // Modals
-  const [isGameSelectorOpen, setIsGameSelectorOpen] = useState<boolean>(false);
   const [isInstallModalOpen, setIsInstallModalOpen] = useState<boolean>(false);
 
-  // Auto-play interval ref
   const playTimerRef = useRef<number | null>(null);
 
-  // Start analysis for the selected game
+  // Run Stockfish 19 Game Review
   const runGameReview = useCallback(async (game: ChessComGame) => {
     setIsAnalyzing(true);
     setAnalysisProgress(0);
@@ -44,18 +41,18 @@ export default function App() {
       setReviewResult(result);
       setCurrentPly(0);
     } catch (err) {
-      console.error('Error reviewing game:', err);
+      console.error('Error reviewing game with Stockfish 19:', err);
     } finally {
       setIsAnalyzing(false);
     }
   }, []);
 
-  // Run review on game change
+  // Trigger review on game selection
   useEffect(() => {
     runGameReview(selectedGame);
   }, [selectedGame, runGameReview]);
 
-  // Compute FEN for current ply
+  // Derive FEN for current ply
   const currentFen = React.useMemo(() => {
     const chess = new Chess();
     try {
@@ -71,7 +68,7 @@ export default function App() {
     }
   }, [selectedGame, currentPly]);
 
-  // Get current move review
+  // Current move review object
   const currentMoveReview = React.useMemo(() => {
     if (!reviewResult || currentPly <= 0 || currentPly > reviewResult.moves.length) {
       return undefined;
@@ -79,7 +76,7 @@ export default function App() {
     return reviewResult.moves[currentPly - 1];
   }, [reviewResult, currentPly]);
 
-  // Play audio sound on ply change
+  // Handle ply selection and sound effects
   const handleSelectPly = useCallback(
     (newPly: number) => {
       const clamped = Math.max(0, Math.min(newPly, reviewResult?.moves.length || 0));
@@ -117,7 +114,7 @@ export default function App() {
           handleSelectPly(next);
           return next;
         });
-      }, 1100);
+      }, 1200);
     } else {
       if (playTimerRef.current) {
         clearInterval(playTimerRef.current);
@@ -132,14 +129,12 @@ export default function App() {
     };
   }, [isPlaying, reviewResult, handleSelectPly]);
 
-  // Keyboard navigation shortcuts
+  // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignore if user is typing in an input
       if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
         return;
       }
-
       if (e.key === 'ArrowLeft') {
         e.preventDefault();
         setIsPlaying(false);
@@ -160,7 +155,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentPly, handleSelectPly]);
 
-  // Jump to next blunder / mistake
+  // Jump to next blunder or mistake
   const jumpToNextError = () => {
     if (!reviewResult) return;
     const moves = reviewResult.moves;
@@ -170,7 +165,6 @@ export default function App() {
         return;
       }
     }
-    // Loop around from beginning
     for (let i = 0; i < currentPly; i++) {
       if (moves[i].classification === 'blunder' || moves[i].classification === 'mistake') {
         handleSelectPly(i + 1);
@@ -179,7 +173,7 @@ export default function App() {
     }
   };
 
-  // Jump to next brilliant move (!!)
+  // Jump to next brilliant or great move
   const jumpToNextBrilliant = () => {
     if (!reviewResult) return;
     const moves = reviewResult.moves;
@@ -203,7 +197,7 @@ export default function App() {
     sounds.enabled = newState;
   };
 
-  // Score in CP from White's perspective
+  // Centipawn evaluation from White's perspective for the eval bar
   const currentEvalScoreCp = React.useMemo(() => {
     if (!reviewResult || currentPly === 0) return 0;
     const review = reviewResult.moves[currentPly - 1];
@@ -213,9 +207,8 @@ export default function App() {
 
   return (
     <div className="flex flex-col min-h-screen bg-[#070A10] text-slate-100 font-sans selection:bg-cyan-500/30 selection:text-cyan-200">
-      {/* Top Header */}
+      {/* Header */}
       <Header
-        onOpenGameSelector={() => setIsGameSelectorOpen(true)}
         onOpenInstallModal={() => setIsInstallModalOpen(true)}
         soundEnabled={soundEnabled}
         onToggleSound={handleToggleSound}
@@ -225,12 +218,21 @@ export default function App() {
         analysisProgress={analysisProgress}
       />
 
+      {/* Prominent Chess.com Player Search & Game Picker Banner */}
+      <UsernameSearchBanner
+        currentUsername={currentUsername}
+        onSelectGame={(game) => {
+          setSelectedGame(game);
+        }}
+        selectedGameId={selectedGame.id}
+      />
+
       {/* Main Review Arena */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-2 sm:p-4 md:p-6 flex flex-col justify-center">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-2 sm:p-4 md:p-6 flex flex-col justify-start">
         <div className="grid grid-cols-1 lg:grid-cols-[auto_1fr] gap-4 sm:gap-6 items-start">
-          {/* Left Column: Eval Bar + Chessboard */}
+          {/* Left Column: Dynamic Eval Bar + Chessboard */}
           <div className="flex justify-center items-center w-full">
-            <div className="flex items-stretch gap-2 sm:gap-3 w-full max-w-[620px]">
+            <div className="flex items-stretch gap-2.5 sm:gap-3.5 w-full max-w-[600px]">
               {/* Dynamic Evaluation Bar */}
               <EvalBar
                 scoreCp={currentEvalScoreCp}
@@ -250,7 +252,7 @@ export default function App() {
           </div>
 
           {/* Right Column: Game Review Panel & Move Breakdown */}
-          <div className="w-full h-full min-h-[500px]">
+          <div className="w-full h-full min-h-[520px]">
             <GameReviewPanel
               game={selectedGame}
               reviewResult={reviewResult}
@@ -265,16 +267,7 @@ export default function App() {
         </div>
       </main>
 
-      {/* Modals */}
-      <GameSelectorModal
-        isOpen={isGameSelectorOpen}
-        onClose={() => setIsGameSelectorOpen(false)}
-        onSelectGame={(game) => {
-          setSelectedGame(game);
-        }}
-        initialUsername="hikaru"
-      />
-
+      {/* APK & PWA Install Modal */}
       <PWAInstallModal
         isOpen={isInstallModalOpen}
         onClose={() => setIsInstallModalOpen(false)}

@@ -2,8 +2,8 @@ import { Chess, Square, PieceSymbol } from 'chess.js';
 import { MoveClassification, MoveReview, GameReviewResult, GameStats } from '../types/chess';
 
 export interface EngineEvaluation {
-  score: number; // in centipawns, always from White's perspective
-  mate?: number; // mate in N (positive = white mates, negative = black mates)
+  score: number; // in centipawns, from the perspective of the side to move
+  mate?: number;
   bestMoveUci: string;
   bestMoveSan?: string;
   pv: string[];
@@ -19,138 +19,146 @@ const PIECE_VALUES: Record<PieceSymbol, number> = {
   k: 20000,
 };
 
-// Common opening book lines up to ply 8
+// Opening theory book moves (common lines)
 const OPENING_BOOK = new Set([
   'e2e4', 'e7e5', 'g1f3', 'b8c6', 'f1c4', 'f1b5', 'g8f6', 'd2d4', 'd7d5',
   'c2c4', 'e7e6', 'c7c5', 'c7c6', 'g7g6', 'd2d3', 'b1c3', 'f2f4', 'b2b3',
   'e2e4 c7c5', 'e2e4 e7e5', 'd2d4 d7d5', 'd2d4 g8f6', 'c2c4 e7e6',
-  'e2e4 e7e6', 'e2e4 c7c6', 'g1f3 d7d5', 'c2c4 g7g6',
+  'e2e4 e7e6', 'e2e4 c7c6', 'g1f3 d7d5', 'c2c4 g7g6', 'g1f3 g8f6',
 ]);
 
 class StockfishEngineService {
   private worker: Worker | null = null;
   private isReady: boolean = false;
-  private pendingResolvers: Map<string, (evalResult: EngineEvaluation) => void> = new Map();
-  private currentJobId: number = 0;
-  private activeJob: { id: number; fen: string; resolve: (val: EngineEvaluation) => void } | null = null;
-  private engineFlavor: string = 'Stockfish 19';
+  private readyPromise: Promise<void> | null = null;
+  private currentResolver: ((res: EngineEvaluation) => void) | null = null;
+  private currentScore: number = 0;
+  private currentMate?: number = undefined;
+  private currentBestMove: string = '';
+  private currentPv: string[] = [];
+  private currentDepth: number = 8;
   private evalCache: Map<string, EngineEvaluation> = new Map();
+  private commandQueue: Array<() => void> = [];
+  private isProcessing: boolean = false;
 
   constructor() {
-    this.initEngine();
+    this.readyPromise = this.initEngine();
   }
 
-  private initEngine() {
+  private async initEngine(): Promise<void> {
     if (typeof window === 'undefined') return;
 
-    try {
-      // First try WASM single-thread Stockfish 19
-      this.worker = new Worker('/stockfish-19-lite-single.js');
-      this.setupWorkerListeners();
-      this.worker.postMessage('uci');
-      this.worker.postMessage('isready');
-    } catch {
+    return new Promise((resolve) => {
       try {
-        // Fallback to ASM JS
-        this.worker = new Worker('/stockfish-19-asm.js');
-        this.setupWorkerListeners();
+        this.worker = new Worker('/stockfish-19-lite-single.js');
+        this.worker.onmessage = (e: MessageEvent) => {
+          this.handleWorkerMessage(e.data, resolve);
+        };
+        this.worker.onerror = (err) => {
+          console.warn('Stockfish Worker error, using fallback:', err);
+          this.isReady = true;
+          resolve();
+        };
+
         this.worker.postMessage('uci');
         this.worker.postMessage('isready');
+
+        // Safety timeout for worker initialization
+        setTimeout(() => {
+          this.isReady = true;
+          resolve();
+        }, 1200);
       } catch {
-        console.warn('Stockfish Worker unavailable, using internal positional engine');
-      }
-    }
-  }
-
-  private setupWorkerListeners() {
-    if (!this.worker) return;
-
-    this.worker.onmessage = (event: MessageEvent) => {
-      const line = typeof event.data === 'string' ? event.data : '';
-      if (!line) return;
-
-      if (line.includes('readyok') || line.includes('uciok')) {
         this.isReady = true;
+        resolve();
       }
-
-      // Parse bestmove e2e4 or bestmove e2e4 ponder e7e5
-      if (line.startsWith('bestmove') && this.activeJob) {
-        const parts = line.split(' ');
-        const bestMoveUci = parts[1] || '';
-        const job = this.activeJob;
-        this.activeJob = null;
-
-        // If we received an evaluation during info lines, finish job
-        const cached = this.evalCache.get(job.fen);
-        if (cached && bestMoveUci) {
-          cached.bestMoveUci = bestMoveUci;
-          job.resolve(cached);
-        } else {
-          // Provide fallback eval
-          const fallback = this.heuristicEval(job.fen, bestMoveUci);
-          job.resolve(fallback);
-        }
-      }
-
-      // Parse info depth X score cp Y pv ...
-      if (line.startsWith('info') && line.includes('score') && this.activeJob) {
-        const parsed = this.parseInfoLine(line, this.activeJob.fen);
-        if (parsed) {
-          this.evalCache.set(this.activeJob.fen, parsed);
-        }
-      }
-    };
-
-    this.worker.onerror = () => {
-      console.warn('Stockfish Worker encountered an error, falling back to heuristic engine.');
-      if (this.activeJob) {
-        const fallback = this.heuristicEval(this.activeJob.fen);
-        this.activeJob.resolve(fallback);
-        this.activeJob = null;
-      }
-    };
+    });
   }
 
-  private parseInfoLine(line: string, fen: string): EngineEvaluation | null {
-    const depthMatch = line.match(/depth\s+(\d+)/);
-    const depth = depthMatch ? parseInt(depthMatch[1], 10) : 10;
+  private handleWorkerMessage(data: unknown, onReady?: () => void) {
+    const line = typeof data === 'string' ? data : '';
+    if (!line) return;
 
-    let score = 0;
-    let mate: number | undefined = undefined;
-
-    const cpMatch = line.match(/score\s+cp\s+(-?\d+)/);
-    const mateMatch = line.match(/score\s+mate\s+(-?\d+)/);
-
-    // Stockfish outputs score from perspective of side to move in FEN
-    const isBlackToMove = fen.includes(' b ');
-
-    if (cpMatch) {
-      let cp = parseInt(cpMatch[1], 10);
-      if (isBlackToMove) cp = -cp; // Convert to White's perspective
-      score = cp;
-    } else if (mateMatch) {
-      const m = parseInt(mateMatch[1], 10);
-      mate = isBlackToMove ? -m : m;
-      score = mate > 0 ? 10000 - mate * 100 : -10000 - mate * 100;
+    if (line.includes('readyok') || line.includes('uciok')) {
+      this.isReady = true;
+      if (onReady) onReady();
+      return;
     }
 
-    const pvMatch = line.match(/pv\s+([a-h1-8qrbn\s]+)/);
-    const pvTokens = pvMatch ? pvMatch[1].trim().split(/\s+/) : [];
-    const bestMoveUci = pvTokens[0] || '';
+    if (line.startsWith('info ') && line.includes('score cp ')) {
+      const cpMatch = line.match(/score cp (-?\d+)/);
+      if (cpMatch) {
+        this.currentScore = parseInt(cpMatch[1], 10);
+        this.currentMate = undefined;
+      }
+      const pvMatch = line.match(/\bpv\s+(.+)$/);
+      if (pvMatch) {
+        this.currentPv = pvMatch[1].trim().split(/\s+/);
+      }
+      const depthMatch = line.match(/depth\s+(\d+)/);
+      if (depthMatch) {
+        this.currentDepth = parseInt(depthMatch[1], 10);
+      }
+    } else if (line.startsWith('info ') && line.includes('score mate ')) {
+      const mateMatch = line.match(/score mate (-?\d+)/);
+      if (mateMatch) {
+        const m = parseInt(mateMatch[1], 10);
+        this.currentMate = m;
+        this.currentScore = m > 0 ? 10000 - m * 100 : -10000 - m * 100;
+      }
+      const pvMatch = line.match(/\bpv\s+(.+)$/);
+      if (pvMatch) {
+        this.currentPv = pvMatch[1].trim().split(/\s+/);
+      }
+    } else if (line.startsWith('bestmove ')) {
+      const parts = line.split(' ');
+      this.currentBestMove = parts[1] || '';
 
-    return {
-      score,
-      mate,
-      bestMoveUci,
-      pv: pvTokens,
-      depth,
-    };
+      if (this.currentResolver) {
+        const resolve = this.currentResolver;
+        this.currentResolver = null;
+        resolve({
+          score: this.currentScore,
+          mate: this.currentMate,
+          bestMoveUci: this.currentBestMove,
+          pv: this.currentPv,
+          depth: this.currentDepth,
+        });
+      }
+      this.processNextInQueue();
+    }
+  }
+
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.commandQueue.push(async () => {
+        try {
+          const res = await task();
+          resolve(res);
+        } catch (err) {
+          reject(err);
+        }
+      });
+      if (!this.isProcessing) {
+        this.processNextInQueue();
+      }
+    });
+  }
+
+  private processNextInQueue() {
+    if (this.commandQueue.length > 0) {
+      this.isProcessing = true;
+      const nextTask = this.commandQueue.shift();
+      if (nextTask) nextTask();
+    } else {
+      this.isProcessing = false;
+    }
   }
 
   /**
-   * Fast, reliable heuristic evaluator for initial state or fallback
+   * Fast positional evaluator for backup
    */
-  private heuristicEval(fen: string, bestMoveUci?: string): EngineEvaluation {
+  private heuristicEval(fen: string): EngineEvaluation {
     const chess = new Chess(fen);
     let materialScore = 0;
     const board = chess.board();
@@ -160,129 +168,130 @@ class StockfishEngineService {
         const piece = board[r][c];
         if (piece) {
           const val = PIECE_VALUES[piece.type];
-          // Positional bonuses: center control
           const centerDist = Math.abs(3.5 - r) + Math.abs(3.5 - c);
           const posBonus = (7 - centerDist) * 3;
-          const totalPieceVal = val + posBonus;
-          materialScore += piece.color === 'w' ? totalPieceVal : -totalPieceVal;
+          const pieceVal = val + posBonus;
+          materialScore += piece.color === 'w' ? pieceVal : -pieceVal;
         }
       }
     }
 
-    const legalMoves = chess.moves({ verbose: true });
-    let chosenUci = bestMoveUci;
-    if (!chosenUci && legalMoves.length > 0) {
-      // Pick capture or check or center move
-      const captureMove = legalMoves.find((m) => m.captured || m.san.includes('+') || m.san.includes('#'));
-      const fallbackMove = captureMove || legalMoves[Math.floor(legalMoves.length / 2)] || legalMoves[0];
-      chosenUci = fallbackMove.from + fallbackMove.to + (fallbackMove.promotion || '');
+    // Side to move perspective
+    const isBlack = fen.includes(' b ');
+    const sideScore = isBlack ? -materialScore : materialScore;
+
+    const moves = chess.moves({ verbose: true });
+    let bestUci = '';
+    if (moves.length > 0) {
+      const captureOrCheck = moves.find((m) => m.captured || m.san.includes('+') || m.san.includes('#'));
+      const picked = captureOrCheck || moves[0];
+      bestUci = picked.from + picked.to + (picked.promotion || '');
     }
 
     return {
-      score: materialScore,
-      bestMoveUci: chosenUci || '',
-      pv: chosenUci ? [chosenUci] : [],
-      depth: 10,
+      score: sideScore,
+      bestMoveUci: bestUci,
+      pv: bestUci ? [bestUci] : [],
+      depth: 6,
     };
   }
 
   /**
-   * Evaluate a single position using Stockfish 19
+   * Evaluates a single FEN position using Stockfish 19
    */
-  public async evaluatePosition(fen: string, depth = 12): Promise<EngineEvaluation> {
+  public async evaluateFen(fen: string, depth = 8): Promise<EngineEvaluation> {
     if (this.evalCache.has(fen)) {
       return this.evalCache.get(fen)!;
     }
 
+    await this.readyPromise;
+
     if (!this.worker) {
-      const res = this.heuristicEval(fen);
-      this.evalCache.set(fen, res);
-      return res;
+      const h = this.heuristicEval(fen);
+      this.evalCache.set(fen, h);
+      return h;
     }
 
-    return new Promise((resolve) => {
-      const jobId = ++this.currentJobId;
-      const timeout = setTimeout(() => {
-        if (this.activeJob && this.activeJob.id === jobId) {
-          const fallback = this.heuristicEval(fen);
-          this.activeJob = null;
-          resolve(fallback);
-        }
-      }, 450); // Fast timeout for responsive review
+    return this.enqueue(
+      () =>
+        new Promise<EngineEvaluation>((resolve) => {
+          this.currentScore = 0;
+          this.currentMate = undefined;
+          this.currentBestMove = '';
+          this.currentPv = [];
+          this.currentDepth = depth;
 
-      this.activeJob = {
-        id: jobId,
-        fen,
-        resolve: (val) => {
-          clearTimeout(timeout);
-          this.evalCache.set(fen, val);
-          resolve(val);
-        },
-      };
+          const timeout = setTimeout(() => {
+            if (this.currentResolver) {
+              const fallback = this.heuristicEval(fen);
+              this.currentResolver = null;
+              this.evalCache.set(fen, fallback);
+              resolve(fallback);
+              this.processNextInQueue();
+            }
+          }, 1200);
 
-      try {
-        this.worker!.postMessage(`position fen ${fen}`);
-        this.worker!.postMessage(`go depth ${depth}`);
-      } catch {
-        clearTimeout(timeout);
-        const fallback = this.heuristicEval(fen);
-        resolve(fallback);
-      }
-    });
+          this.currentResolver = (result) => {
+            clearTimeout(timeout);
+            this.evalCache.set(fen, result);
+            resolve(result);
+          };
+
+          try {
+            this.worker!.postMessage(`position fen ${fen}`);
+            this.worker!.postMessage(`go depth ${depth}`);
+          } catch {
+            clearTimeout(timeout);
+            const fallback = this.heuristicEval(fen);
+            resolve(fallback);
+            this.processNextInQueue();
+          }
+        })
+    );
   }
 
   /**
-   * Detects if a move is a genuine sacrifice for the greater good
+   * Detects if a move was a sacrifice for tactical or positional advantage
    */
   private checkIsSacrifice(
     chessBefore: Chess,
     move: { from: Square; to: Square; piece: PieceSymbol; captured?: PieceSymbol; san: string },
-    evalAfterMovingPerspective: number,
+    evalAfterPlayer: number,
     cpLoss: number
   ): boolean {
     const pieceVal = PIECE_VALUES[move.piece];
     const capturedVal = move.captured ? PIECE_VALUES[move.captured] : 0;
 
-    // Must not ruin the game (eval remains competitive or winning >= -100 cp)
-    if (evalAfterMovingPerspective < -100) return false;
-    // CP loss must be under 15 as requested by user
+    // Must satisfy user prompt rule: under 15 cp loss
     if (cpLoss >= 15) return false;
+    // Must not ruin the game (evaluation remains competitive >= -80 cp or mate)
+    if (evalAfterPlayer < -80) return false;
 
-    // 1. Deficit exchange: Gave up Queen (900) for Rook/minor/pawn, or Rook (500) for minor/pawn
-    if (pieceVal >= 500 && pieceVal - capturedVal >= 200) {
+    // Queen (900) traded for Rook (500) or minor (320) or pawn (100)
+    if (pieceVal === 900 && capturedVal <= 500) {
       return true;
     }
 
-    // 2. Minor piece sacrifice (Knight/Bishop 320-330) without capturing equal piece
-    if (pieceVal >= 320 && pieceVal - capturedVal >= 200) {
+    // Rook (500) traded for minor (320) or pawn (100) or open file sacrifice
+    if (pieceVal === 500 && capturedVal <= 320) {
       return true;
     }
 
-    // 3. Moved high-value piece (Q, R, N, B) into square attacked by opponent with less defense
-    const turnColor = chessBefore.turn();
-    const opponentColor = turnColor === 'w' ? 'b' : 'w';
-
-    // Simulate move to check if the landed piece is en prise / can be taken next turn
-    const fenAfterMove = chessBefore.fen();
-    const sim = new Chess(fenAfterMove);
-    const opponentMoves = sim.moves({ verbose: true });
-    const canBeCaptured = opponentMoves.some((m) => m.to === move.to);
-
-    if (canBeCaptured && pieceVal >= 320) {
-      // If higher value piece can be taken by opponent pawn/minor
-      const pawnOrMinorCapture = opponentMoves.some(
-        (m) => m.to === move.to && (m.piece === 'p' || PIECE_VALUES[m.piece] < pieceVal)
-      );
-      if (pawnOrMinorCapture) {
-        return true;
-      }
+    // Minor piece (Knight/Bishop 320-330) given up for Pawn or nothing
+    if ((pieceVal === 320 || pieceVal === 330) && capturedVal <= 100) {
+      // Check if square is attacked by opponent
+      const sim = new Chess(chessBefore.fen());
+      sim.move(move);
+      const opponentMoves = sim.moves({ verbose: true });
+      const canBeTaken = opponentMoves.some((m) => m.to === move.to);
+      if (canBeTaken) return true;
     }
 
     return false;
   }
 
   /**
-   * Review an entire game step-by-step using Stockfish 19
+   * Reviews an entire chess game with Stockfish 19
    */
   public async reviewGame(
     pgn: string,
@@ -292,45 +301,44 @@ class StockfishEngineService {
     try {
       chess.loadPgn(pgn);
     } catch {
-      // If raw moves string or loose PGN
       chess.reset();
     }
 
     const history = chess.history({ verbose: true });
     const totalPlies = history.length;
-
-    // Reset chess to start
     chess.reset();
 
     const movesReview: MoveReview[] = [];
     const evalGraph: { ply: number; evalWhite: number; classification?: MoveClassification }[] = [];
 
-    // Initial position evaluation (ply 0)
+    // Evaluate Start Position
     const startFen = chess.fen();
-    let prevEvalResult = await this.evaluatePosition(startFen, 10);
-    evalGraph.push({ ply: 0, evalWhite: prevEvalResult.score });
+    let prevEval = await this.evaluateFen(startFen, 8);
+    // Convert to White's perspective
+    evalGraph.push({ ply: 0, evalWhite: prevEval.score });
 
     for (let i = 0; i < totalPlies; i++) {
       const ply = i + 1;
       const move = history[i];
       const fenBefore = chess.fen();
-      const color = move.color; // 'w' | 'b'
+      const color = move.color; // 'w' or 'b'
 
-      // Eval before move from White's perspective
-      const evalBeforeWhite = prevEvalResult.score;
-      const bestMoveUci = prevEvalResult.bestMoveUci;
-      const pvLine = prevEvalResult.pv || [];
+      // In fenBefore, it is `color`'s turn to move.
+      // Stockfish score is already from `color`'s perspective!
+      const scoreBeforePlayer = prevEval.score;
+      const bestMoveUci = prevEval.bestMoveUci;
+      const pvLine = prevEval.pv || [];
 
-      // Find SAN for best move
+      // Calculate SAN for best move
       let bestMoveSan = bestMoveUci;
       try {
-        const tempChess = new Chess(fenBefore);
+        const testChess = new Chess(fenBefore);
         if (bestMoveUci.length >= 4) {
           const from = bestMoveUci.substring(0, 2) as Square;
           const to = bestMoveUci.substring(2, 4) as Square;
           const promo = bestMoveUci.length > 4 ? bestMoveUci[4] : undefined;
-          const executed = tempChess.move({ from, to, promotion: promo });
-          if (executed) bestMoveSan = executed.san;
+          const mRes = testChess.move({ from, to, promotion: promo });
+          if (mRes) bestMoveSan = mRes.san;
         }
       } catch {
         bestMoveSan = bestMoveUci;
@@ -340,64 +348,57 @@ class StockfishEngineService {
       chess.move(move);
       const fenAfter = chess.fen();
 
-      // Evaluate new position with Stockfish 19
-      const evalAfterResult = await this.evaluatePosition(fenAfter, 12);
-      prevEvalResult = evalAfterResult;
-      const evalAfterWhite = evalAfterResult.score;
+      // In fenAfter, it is now the opponent's turn.
+      // Stockfish evaluates fenAfter from opponent's perspective!
+      const evalAfterOpp = await this.evaluateFen(fenAfter, 8);
+      prevEval = evalAfterOpp;
 
-      // Convert evaluations to perspective of the player who just moved
-      const evalBeforeMoving = color === 'w' ? evalBeforeWhite : -evalBeforeWhite;
-      const evalAfterMoving = color === 'w' ? evalAfterWhite : -evalAfterWhite;
+      // Convert evalAfter to player's perspective:
+      const scoreAfterPlayer = -evalAfterOpp.score;
+      const evalWhite = color === 'w' ? scoreAfterPlayer : -scoreAfterPlayer;
 
-      // The best possible eval for this move was either the engine's predicted score or evalBeforeMoving
-      const bestMoveEvalMoving = Math.max(evalBeforeMoving, evalAfterMoving);
-
-      // Centipawn loss: how much advantage did the player forfeit?
-      // Strict rule: if player played the engine's best move or improved, cpLoss is 0
       const playedUci = move.from + move.to + (move.promotion || '');
-      let cpLoss = 0;
 
+      // Centipawn Loss Calculation:
+      let cpLoss = 0;
       if (playedUci === bestMoveUci) {
         cpLoss = 0;
       } else {
-        const rawLoss = bestMoveEvalMoving - evalAfterMoving;
-        cpLoss = Math.max(0, Math.round(rawLoss));
+        const loss = scoreBeforePlayer - scoreAfterPlayer;
+        cpLoss = Math.max(0, Math.round(loss));
       }
 
-      // Check for sacrifices
+      // Detect Piece Sacrifices
       const isSacrifice = this.checkIsSacrifice(
         new Chess(fenBefore),
         { from: move.from, to: move.to, piece: move.piece, captured: move.captured, san: move.san },
-        evalAfterMoving,
+        scoreAfterPlayer,
         cpLoss
       );
 
-      // Move classification logic adhering strictly to the user prompt:
-      // - centipawn loss 0 -> best move
-      // - under 15 and sacrifices a piece -> brilliant
-      // - centipawn loss 0 and didn't completely ruin the game / critical hold -> great move
-      // - 1-15 -> excellent
-      // - 16-40 -> good
-      // - 41-100 -> inaccuracy
-      // - 101-200 -> mistake
-      // - >= 201 -> blunder
-      // - first few moves in standard theory -> book
+      // Classification exactly per user prompt specifications:
+      // - under 15 and sacrifices a piece -> brilliant (!!)
+      // - centipawn loss 0 and didn't completely ruin the game -> great move (!)
+      // - centipawn loss 0 -> best move (★)
+      // - 1-15 -> excellent (✓)
+      // - 16-40 -> good (○)
+      // - 41-100 -> inaccuracy (?!)
+      // - 101-200 -> mistake (?)
+      // - >= 201 -> blunder (??)
+      // - early moves in book -> book (📖)
       let classification: MoveClassification = 'best';
 
-      const isBookCandidate = i < 6 && (OPENING_BOOK.has(playedUci) || OPENING_BOOK.has(`${move.from}${move.to}`));
+      const isEarlyBook = i < 6 && OPENING_BOOK.has(playedUci);
 
       if (isSacrifice && cpLoss < 15) {
         classification = 'brilliant';
-      } else if (isBookCandidate && cpLoss <= 10) {
+      } else if (isEarlyBook && cpLoss <= 10) {
         classification = 'book';
       } else if (cpLoss === 0) {
-        // Distinguish Great move vs Best move:
-        // A "Great move" is an extraordinary 0 CP loss move:
-        // e.g. finding the only move in a sharp/difficult position (second move would be inaccuracy/mistake)
-        // or turning a draw/loss around, or keeping an advantage under attack.
-        const isCriticalPosition = Math.abs(evalBeforeMoving) < 150 && chess.isCheck();
-        const isLongTactical = move.san.includes('x') || move.san.includes('+') || move.san.includes('#');
-        if ((isCriticalPosition || (isLongTactical && i > 12)) && evalAfterMoving >= -50) {
+        // Distinguish Great vs Best:
+        // A Great move is an extraordinary only-move / defensive stand / tactical finding
+        const isTenseOrCritical = chess.isCheck() || Math.abs(scoreBeforePlayer) > 200 || i > 15;
+        if (isTenseOrCritical && scoreAfterPlayer >= -50) {
           classification = 'great';
         } else {
           classification = 'best';
@@ -426,11 +427,11 @@ class StockfishEngineService {
         captured: move.captured,
         fenBefore,
         fenAfter,
-        evalBefore: evalBeforeMoving,
-        evalAfter: evalAfterMoving,
+        evalBefore: scoreBeforePlayer,
+        evalAfter: scoreAfterPlayer,
         bestMoveUci,
         bestMoveSan,
-        bestMoveEval: bestMoveEvalMoving,
+        bestMoveEval: scoreBeforePlayer,
         pvLine,
         cpLoss,
         classification,
@@ -440,14 +441,13 @@ class StockfishEngineService {
       };
 
       movesReview.push(review);
-      evalGraph.push({ ply, evalWhite: evalAfterWhite, classification });
+      evalGraph.push({ ply, evalWhite, classification });
 
       if (onProgress) {
         onProgress(Math.round(((i + 1) / totalPlies) * 100), i + 1, totalPlies);
       }
     }
 
-    // Compute Game Stats & CAPS accuracy
     const whiteStats = this.computeSideStats(movesReview.filter((m) => m.color === 'w'));
     const blackStats = this.computeSideStats(movesReview.filter((m) => m.color === 'b'));
 
@@ -477,21 +477,18 @@ class StockfishEngineService {
 
     if (moves.length === 0) return stats;
 
-    let totalCpLoss = 0;
+    let totalLoss = 0;
     for (const m of moves) {
-      totalCpLoss += m.cpLoss;
+      totalLoss += m.cpLoss;
       stats[m.classification]++;
     }
 
-    const avgLoss = totalCpLoss / moves.length;
-    stats.avgCpLoss = Math.round(avgLoss);
+    const avgLoss = Math.round(totalLoss / moves.length);
+    stats.avgCpLoss = avgLoss;
 
-    // Standard Chess.com CAPS / Lichess accuracy formula:
-    // Accuracy % = 103.1668 * e^(-0.04354 * avgCpLoss) - 3.1669
-    // Bounded between 15% and 99.8%
-    const formulaVal = 103.1668 * Math.exp(-0.04354 * Math.min(avgLoss, 120)) - 3.1669;
-    const accuracy = Math.max(15, Math.min(99.8, formulaVal));
-    stats.accuracy = Math.round(accuracy * 10) / 10;
+    // Standard Chess.com CAPS accuracy formula
+    const rawAccuracy = 103.1668 * Math.exp(-0.04354 * Math.min(avgLoss, 120)) - 3.1669;
+    stats.accuracy = Math.round(Math.max(20, Math.min(99.5, rawAccuracy)) * 10) / 10;
 
     return stats;
   }
