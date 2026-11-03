@@ -1,7 +1,11 @@
 #!/bin/bash
 set -e
 
-echo "=== Building Fully Compliant Android APK for Avelux Grand ==="
+echo "=== Building 100% Offline Standalone Android APK for Avelux Grand ==="
+
+# 1. Build fresh production web assets
+echo "-> Building web bundle with npm run build..."
+npm run build
 
 ANDROID_JAR="/usr/lib/android-sdk/platforms/android-23/android.jar"
 BUILD_DIR="/tmp/avelux_apk_build"
@@ -19,14 +23,19 @@ mkdir -p "$BUILD_DIR/assets"
 mkdir -p "$BUILD_DIR/obj"
 mkdir -p "$BUILD_DIR/bin"
 
-# 1. Provide all standard density icons
+# 2. Copy production assets into the APK (excluding any apk files)
+echo "-> Copying built web assets to APK assets/..."
+cp -r dist/* "$BUILD_DIR/assets/"
+rm -f "$BUILD_DIR/assets/"*.apk* || true
+
+# 3. Provide all standard density icons
 cp public/pwa-192x192.png "$BUILD_DIR/res/mipmap-mdpi/ic_launcher.png"
 cp public/pwa-192x192.png "$BUILD_DIR/res/mipmap-hdpi/ic_launcher.png"
 cp public/pwa-192x192.png "$BUILD_DIR/res/mipmap-xhdpi/ic_launcher.png"
 cp public/pwa-512x512.png "$BUILD_DIR/res/mipmap-xxhdpi/ic_launcher.png"
 cp public/pwa-512x512.png "$BUILD_DIR/res/mipmap-xxxhdpi/ic_launcher.png"
 
-# 2. Values: strings & styles
+# 4. Values: strings & styles
 cat << 'EOF' > "$BUILD_DIR/res/values/strings.xml"
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -43,7 +52,7 @@ cat << 'EOF' > "$BUILD_DIR/res/values/styles.xml"
 </resources>
 EOF
 
-# 3. Create fully compliant AndroidManifest.xml (CRITICAL: android:exported="true" for Android 12+)
+# 5. Manifest (android:exported="true" for Android 12+, cleartext allowed, standalone)
 cat << 'EOF' > "$BUILD_DIR/AndroidManifest.xml"
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -80,10 +89,8 @@ cat << 'EOF' > "$BUILD_DIR/AndroidManifest.xml"
 </manifest>
 EOF
 
-# 4. Java MainActivity with full WebView features and safe chrome client
-APP_URL="${APP_URL:-https://ais-dev-wrjukk3553zsmjcwtxwacg-996588444002.asia-east1.run.app}"
-
-cat << EOF > "$BUILD_DIR/src/com/avelux/grand/MainActivity.java"
+# 6. MainActivity.java: Self-contained, loads directly from local APK assets (NO GOOGLE SIGN IN)
+cat << 'EOF' > "$BUILD_DIR/src/com/avelux/grand/MainActivity.java"
 package com.avelux.grand;
 
 import android.app.Activity;
@@ -94,6 +101,11 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
+import java.io.InputStream;
+import java.util.HashMap;
+import java.util.Map;
 
 public class MainActivity extends Activity {
     private WebView webView;
@@ -117,6 +129,8 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
+        settings.setAllowFileAccessFromFileURLs(true);
+        settings.setAllowUniversalAccessFromFileURLs(true);
         settings.setUseWideViewPort(true);
         settings.setLoadWithOverviewMode(true);
         settings.setSupportZoom(false);
@@ -124,14 +138,50 @@ public class MainActivity extends Activity {
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public boolean shouldOverrideUrlLoading(WebView view, String url) {
-                view.loadUrl(url);
-                return true;
+            public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
+                return handleIntercept(url);
+            }
+
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                return handleIntercept(request.getUrl().toString());
+            }
+
+            private WebResourceResponse handleIntercept(String url) {
+                if (url.startsWith("http://localhost/") || url.startsWith("https://localhost/")) {
+                    String clean = url.replace("https://localhost/", "").replace("http://localhost/", "");
+                    if (clean.isEmpty() || clean.equals("/")) clean = "index.html";
+                    if (clean.contains("?")) clean = clean.substring(0, clean.indexOf("?"));
+                    if (clean.contains("#")) clean = clean.substring(0, clean.indexOf("#"));
+
+                    try {
+                        InputStream is = getAssets().open(clean);
+                        String mime = "application/octet-stream";
+                        if (clean.endsWith(".html")) mime = "text/html";
+                        else if (clean.endsWith(".js")) mime = "text/javascript";
+                        else if (clean.endsWith(".css")) mime = "text/css";
+                        else if (clean.endsWith(".wasm")) mime = "application/wasm";
+                        else if (clean.endsWith(".png")) mime = "image/png";
+                        else if (clean.endsWith(".svg")) mime = "image/svg+xml";
+                        else if (clean.endsWith(".json")) mime = "application/json";
+
+                        Map<String, String> headers = new HashMap<>();
+                        headers.put("Access-Control-Allow-Origin", "*");
+                        return new WebResourceResponse(mime, "UTF-8", 200, "OK", headers, is);
+                    } catch (Exception e) {
+                        try {
+                            InputStream is = getAssets().open("index.html");
+                            return new WebResourceResponse("text/html", "UTF-8", is);
+                        } catch (Exception ignored) {}
+                    }
+                }
+                // External requests (like Chess.com API) pass straight through to network
+                return null;
             }
         });
-        webView.setWebChromeClient(new WebChromeClient());
 
-        webView.loadUrl("${APP_URL}");
+        webView.setWebChromeClient(new WebChromeClient());
+        webView.loadUrl("http://localhost/index.html");
     }
 
     @Override
@@ -145,26 +195,26 @@ public class MainActivity extends Activity {
 }
 EOF
 
-# 5. Compile resources with aapt
+# 7. Compile resources with aapt
 echo "-> Compiling resources with aapt..."
 aapt package -m -J "$BUILD_DIR/src" \
     -M "$BUILD_DIR/AndroidManifest.xml" \
     -S "$BUILD_DIR/res" \
     -I "$ANDROID_JAR"
 
-# 6. Compile Java sources with javac
+# 8. Compile Java sources with javac
 echo "-> Compiling Java sources..."
 javac -source 8 -target 8 -cp "$ANDROID_JAR" \
     -d "$BUILD_DIR/obj" \
     "$BUILD_DIR/src/com/avelux/grand/R.java" \
     "$BUILD_DIR/src/com/avelux/grand/MainActivity.java"
 
-# 7. Convert to Dalvik dex
+# 9. Convert to Dalvik dex
 echo "-> Converting class files to Dalvik classes.dex..."
 /usr/bin/dalvik-exchange --dex --output="$BUILD_DIR/bin/classes.dex" "$BUILD_DIR/obj"
 
-# 8. Create base APK package with aapt
-echo "-> Packaging APK..."
+# 10. Create base APK package with aapt including all bundled assets
+echo "-> Packaging APK with all web assets..."
 aapt package -f \
     -M "$BUILD_DIR/AndroidManifest.xml" \
     -S "$BUILD_DIR/res" \
@@ -177,11 +227,11 @@ cd "$BUILD_DIR/bin"
 zip -uj unaligned.apk classes.dex
 cd -
 
-# 9. 4-byte Zipalign
+# 11. 4-byte Zipalign
 echo "-> Aligning APK..."
 zipalign -f -p 4 "$BUILD_DIR/bin/unaligned.apk" "$BUILD_DIR/bin/aligned.apk"
 
-# 10. Generate RSA 2048 keystore and sign
+# 12. Sign APK with RSA 2048 key (v1, v2, v3)
 echo "-> Signing APK..."
 KEYSTORE="/tmp/avelux.keystore"
 if [ ! -f "$KEYSTORE" ]; then
@@ -204,4 +254,5 @@ cp "public/avelux-grand.apk" "avelux-grand.apk"
 echo "=== Verification ==="
 apksigner verify -v public/avelux-grand.apk
 aapt dump badging public/avelux-grand.apk | head -n 12
-echo "=== APK Successfully Rebuilt at /public/avelux-grand.apk ==="
+echo "=== 100% Offline Self-Contained APK Built: /public/avelux-grand.apk ==="
+ls -lh public/avelux-grand.apk
