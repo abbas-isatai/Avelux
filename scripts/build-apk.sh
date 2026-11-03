@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== Building Avelux Grand Android APK ==="
+echo "=== Building Fully Compliant Android APK for Avelux Grand ==="
 
 ANDROID_JAR="/usr/lib/android-sdk/platforms/android-23/android.jar"
 BUILD_DIR="/tmp/avelux_apk_build"
@@ -10,19 +10,23 @@ mkdir -p "$BUILD_DIR/src/com/avelux/grand"
 mkdir -p "$BUILD_DIR/res/layout"
 mkdir -p "$BUILD_DIR/res/values"
 mkdir -p "$BUILD_DIR/res/drawable"
+mkdir -p "$BUILD_DIR/res/mipmap-mdpi"
 mkdir -p "$BUILD_DIR/res/mipmap-hdpi"
 mkdir -p "$BUILD_DIR/res/mipmap-xhdpi"
 mkdir -p "$BUILD_DIR/res/mipmap-xxhdpi"
+mkdir -p "$BUILD_DIR/res/mipmap-xxxhdpi"
 mkdir -p "$BUILD_DIR/assets"
 mkdir -p "$BUILD_DIR/obj"
 mkdir -p "$BUILD_DIR/bin"
 
-# 1. Copy icons
+# 1. Provide all standard density icons
+cp public/pwa-192x192.png "$BUILD_DIR/res/mipmap-mdpi/ic_launcher.png"
 cp public/pwa-192x192.png "$BUILD_DIR/res/mipmap-hdpi/ic_launcher.png"
 cp public/pwa-192x192.png "$BUILD_DIR/res/mipmap-xhdpi/ic_launcher.png"
 cp public/pwa-512x512.png "$BUILD_DIR/res/mipmap-xxhdpi/ic_launcher.png"
+cp public/pwa-512x512.png "$BUILD_DIR/res/mipmap-xxxhdpi/ic_launcher.png"
 
-# 2. Create strings.xml & styles.xml
+# 2. Values: strings & styles
 cat << 'EOF' > "$BUILD_DIR/res/values/strings.xml"
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -39,7 +43,7 @@ cat << 'EOF' > "$BUILD_DIR/res/values/styles.xml"
 </resources>
 EOF
 
-# 3. Create AndroidManifest.xml
+# 3. Create fully compliant AndroidManifest.xml (CRITICAL: android:exported="true" for Android 12+)
 cat << 'EOF' > "$BUILD_DIR/AndroidManifest.xml"
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
@@ -48,6 +52,7 @@ cat << 'EOF' > "$BUILD_DIR/AndroidManifest.xml"
     android:versionName="1.0">
 
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="33" />
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
@@ -55,10 +60,16 @@ cat << 'EOF' > "$BUILD_DIR/AndroidManifest.xml"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/AppTheme"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="true"
+        android:allowBackup="true"
+        android:supportsRtl="true">
+
         <activity
-            android:name=".MainActivity"
-            android:configChanges="orientation|keyboardHidden|screenSize"
+            android:name="com.avelux.grand.MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize"
             android:screenOrientation="unspecified">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -69,7 +80,7 @@ cat << 'EOF' > "$BUILD_DIR/AndroidManifest.xml"
 </manifest>
 EOF
 
-# 4. Create MainActivity.java with modern WebView configuration
+# 4. Java MainActivity with full WebView features and safe chrome client
 APP_URL="${APP_URL:-https://ais-dev-wrjukk3553zsmjcwtxwacg-996588444002.asia-east1.run.app}"
 
 cat << EOF > "$BUILD_DIR/src/com/avelux/grand/MainActivity.java"
@@ -134,26 +145,26 @@ public class MainActivity extends Activity {
 }
 EOF
 
-# 5. Compile R.java using aapt
+# 5. Compile resources with aapt
 echo "-> Compiling resources with aapt..."
 aapt package -m -J "$BUILD_DIR/src" \
     -M "$BUILD_DIR/AndroidManifest.xml" \
     -S "$BUILD_DIR/res" \
     -I "$ANDROID_JAR"
 
-# 6. Compile Java sources with javac (source/target 8 for max Dalvik compatibility)
-echo "-> Compiling Java sources with javac..."
+# 6. Compile Java sources with javac
+echo "-> Compiling Java sources..."
 javac -source 8 -target 8 -cp "$ANDROID_JAR" \
     -d "$BUILD_DIR/obj" \
     "$BUILD_DIR/src/com/avelux/grand/R.java" \
     "$BUILD_DIR/src/com/avelux/grand/MainActivity.java"
 
-# 7. Convert class files to Dalvik classes.dex
-echo "-> Converting to Dalvik classes.dex..."
+# 7. Convert to Dalvik dex
+echo "-> Converting class files to Dalvik classes.dex..."
 /usr/bin/dalvik-exchange --dex --output="$BUILD_DIR/bin/classes.dex" "$BUILD_DIR/obj"
 
-# 8. Package initial unsigned APK with aapt
-echo "-> Packaging APK with aapt..."
+# 8. Create base APK package with aapt
+echo "-> Packaging APK..."
 aapt package -f \
     -M "$BUILD_DIR/AndroidManifest.xml" \
     -S "$BUILD_DIR/res" \
@@ -161,16 +172,16 @@ aapt package -f \
     -I "$ANDROID_JAR" \
     -F "$BUILD_DIR/bin/unaligned.apk"
 
-# Add classes.dex into the APK
+# Add classes.dex
 cd "$BUILD_DIR/bin"
 zip -uj unaligned.apk classes.dex
 cd -
 
-# 9. Align APK with zipalign (4 bytes)
-echo "-> Zipaligning APK..."
+# 9. 4-byte Zipalign
+echo "-> Aligning APK..."
 zipalign -f -p 4 "$BUILD_DIR/bin/unaligned.apk" "$BUILD_DIR/bin/aligned.apk"
 
-# 10. Generate keystore if not exists and sign APK with apksigner
+# 10. Generate RSA 2048 keystore and sign
 echo "-> Signing APK..."
 KEYSTORE="/tmp/avelux.keystore"
 if [ ! -f "$KEYSTORE" ]; then
@@ -184,11 +195,13 @@ apksigner sign --ks "$KEYSTORE" \
     --ks-key-alias avelux \
     --ks-pass pass:avelux123 \
     --key-pass pass:avelux123 \
+    --min-sdk-version 21 \
     --out "public/avelux-grand.apk" \
     "$BUILD_DIR/bin/aligned.apk"
 
-# Also copy to root for quick access
 cp "public/avelux-grand.apk" "avelux-grand.apk"
 
-echo "=== Success! APK generated at: public/avelux-grand.apk and /avelux-grand.apk ==="
-ls -lh public/avelux-grand.apk
+echo "=== Verification ==="
+apksigner verify -v public/avelux-grand.apk
+aapt dump badging public/avelux-grand.apk | head -n 12
+echo "=== APK Successfully Rebuilt at /public/avelux-grand.apk ==="
