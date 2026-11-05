@@ -36,10 +36,16 @@ export interface MoveReview {
   isSacrifice: boolean;
   isCheck: boolean;
   isCheckmate: boolean;
+  // Opponent's tactical punishment move in fenAfter (threat arrow)
+  opponentThreatUci?: string;
+  opponentThreatSan?: string;
+  alternativeCandidate?: { san: string; uci: string; evalDiff: number };
 }
 
 export interface GameStats {
   accuracy: number; // 0 - 100%
+  estimatedElo: number; // Estimated Coach ELO (e.g. 1850)
+  coachSummary: string;
   brilliant: number;
   great: number;
   best: number;
@@ -59,6 +65,8 @@ export interface GameReviewResult {
   moves: MoveReview[];
   evalGraph: { ply: number; evalWhite: number; classification?: MoveClassification }[];
   totalPlies: number;
+  opening?: { eco: string; name: string; variation?: string };
+  keyMomentPlies?: number[];
 }
 
 export interface ChessComPlayer {

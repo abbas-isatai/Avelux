@@ -1,5 +1,6 @@
 import { Chess, Square, PieceSymbol } from 'chess.js';
 import { MoveClassification, MoveReview, GameReviewResult, GameStats } from '../types/chess';
+import { identifyOpening } from './ecoOpenings';
 
 export interface EngineEvaluation {
   score: number; // in centipawns, from the perspective of the side to move
@@ -350,7 +351,8 @@ class StockfishEngineService {
    */
   public async reviewGame(
     pgn: string,
-    onProgress?: (progress: number, currentPly: number, totalPlies: number) => void
+    onProgress?: (progress: number, currentPly: number, totalPlies: number) => void,
+    analysisDepth = 10
   ): Promise<GameReviewResult> {
     const chess = new Chess();
     try {
@@ -361,14 +363,17 @@ class StockfishEngineService {
 
     const history = chess.history({ verbose: true });
     const totalPlies = history.length;
+    const sanList = history.map((h) => h.san);
+    const opening = identifyOpening(sanList);
     chess.reset();
 
     const movesReview: MoveReview[] = [];
     const evalGraph: { ply: number; evalWhite: number; classification?: MoveClassification }[] = [];
+    const keyMomentPlies: number[] = [];
 
     // Evaluate Start Position
     const startFen = chess.fen();
-    let prevEval = await this.evaluateFen(startFen, 8);
+    let prevEval = await this.evaluateFen(startFen, analysisDepth);
     // Convert to White's perspective
     evalGraph.push({ ply: 0, evalWhite: prevEval.score });
 
@@ -405,8 +410,24 @@ class StockfishEngineService {
 
       // In fenAfter, it is now the opponent's turn.
       // Stockfish evaluates fenAfter from opponent's perspective!
-      const evalAfterOpp = await this.evaluateFen(fenAfter, 8);
+      const evalAfterOpp = await this.evaluateFen(fenAfter, analysisDepth);
       prevEval = evalAfterOpp;
+
+      // Opponent threat move (refutation of any blunder/mistake/miss)
+      const oppThreatUci = evalAfterOpp.bestMoveUci || '';
+      let oppThreatSan = oppThreatUci;
+      if (oppThreatUci.length >= 4) {
+        try {
+          const oppTest = new Chess(fenAfter);
+          const from = oppThreatUci.substring(0, 2) as Square;
+          const to = oppThreatUci.substring(2, 4) as Square;
+          const promo = oppThreatUci.length > 4 ? oppThreatUci[4] : undefined;
+          const oppM = oppTest.move({ from, to, promotion: promo });
+          if (oppM) oppThreatSan = oppM.san;
+        } catch {
+          oppThreatSan = oppThreatUci;
+        }
+      }
 
       // Convert evalAfter to player's perspective:
       const scoreAfterPlayer = -evalAfterOpp.score;
@@ -506,6 +527,17 @@ class StockfishEngineService {
         classification = 'excellent';
       }
 
+      // Track Key Moments (pivotal turning points)
+      if (
+        classification === 'brilliant' ||
+        classification === 'great' ||
+        classification === 'miss' ||
+        classification === 'blunder' ||
+        (classification === 'mistake' && deltaW >= 0.14)
+      ) {
+        keyMomentPlies.push(ply);
+      }
+
       const review: MoveReview = {
         ply,
         moveNumber: Math.floor(i / 2) + 1,
@@ -529,6 +561,8 @@ class StockfishEngineService {
         isSacrifice,
         isCheck: chess.isCheck(),
         isCheckmate: chess.isGameOver(),
+        opponentThreatUci: oppThreatUci,
+        opponentThreatSan: oppThreatSan,
       };
 
       movesReview.push(review);
@@ -539,8 +573,8 @@ class StockfishEngineService {
       }
     }
 
-    const whiteStats = this.computeSideStats(movesReview.filter((m) => m.color === 'w'));
-    const blackStats = this.computeSideStats(movesReview.filter((m) => m.color === 'b'));
+    const whiteStats = this.computeSideStats(movesReview.filter((m) => m.color === 'w'), 'White');
+    const blackStats = this.computeSideStats(movesReview.filter((m) => m.color === 'b'), 'Black');
 
     return {
       white: whiteStats,
@@ -548,12 +582,16 @@ class StockfishEngineService {
       moves: movesReview,
       evalGraph,
       totalPlies,
+      opening,
+      keyMomentPlies,
     };
   }
 
-  private computeSideStats(moves: MoveReview[]): GameStats {
+  private computeSideStats(moves: MoveReview[], side: 'White' | 'Black'): GameStats {
     const stats: GameStats = {
       accuracy: 90,
+      estimatedElo: 1500,
+      coachSummary: '',
       brilliant: 0,
       great: 0,
       best: 0,
@@ -581,6 +619,28 @@ class StockfishEngineService {
     // Standard Chess.com CAPS accuracy formula
     const rawAccuracy = 103.1668 * Math.exp(-0.04354 * Math.min(avgLoss, 120)) - 3.1669;
     stats.accuracy = Math.round(Math.max(20, Math.min(99.5, rawAccuracy)) * 10) / 10;
+
+    // Coach Performance Rating (Estimated Elo)
+    // Anchored around 1500, scaling with CAPS accuracy and centipawn loss penalty
+    const eloBase = 1450;
+    const accuracyBoost = (stats.accuracy - 72) * 36;
+    const acplPenalty = avgLoss * 3.5;
+    const blunderPenalty = stats.blunder * 45 + stats.miss * 30;
+    const rawElo = eloBase + accuracyBoost - acplPenalty - blunderPenalty;
+    stats.estimatedElo = Math.round(Math.max(500, Math.min(2900, rawElo)) / 25) * 25;
+
+    // Descriptive Coach Persona summary
+    if (stats.accuracy >= 92) {
+      stats.coachSummary = `${side} demonstrated grandmaster-level positional depth and almost flawless tactical precision.`;
+    } else if (stats.accuracy >= 84) {
+      stats.coachSummary = `${side} exhibited master-class control with sharp, punishing attacking lines.`;
+    } else if (stats.accuracy >= 75) {
+      stats.coachSummary = `${side} played solid club-level chess with steady plans, but left occasional tactical resources open.`;
+    } else if (stats.accuracy >= 62) {
+      stats.coachSummary = `${side} fought tenaciously, but critical miscalculations under pressure swung the advantage.`;
+    } else {
+      stats.coachSummary = `${side} was caught in a chaotic tactical storm with sharp momentum swings.`;
+    }
 
     return stats;
   }

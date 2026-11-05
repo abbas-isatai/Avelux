@@ -6,6 +6,7 @@ import { EvalBar } from './components/EvalBar';
 import { ChessBoard } from './components/ChessBoard';
 import { GameReviewPanel } from './components/GameReviewPanel';
 import { PWAInstallModal } from './components/PWAInstallModal';
+import { ShareReviewCardModal } from './components/ShareReviewCardModal';
 import { ChessComGame, GameReviewResult } from './types/chess';
 import { FEATURED_GAMES } from './services/chesscomApi';
 import { stockfishEngine } from './services/chessEngine';
@@ -20,37 +21,55 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
   const [analysisProgress, setAnalysisProgress] = useState<number>(0);
+  const [analysisDepth, setAnalysisDepth] = useState<number>(10);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isInstallModalOpen, setIsInstallModalOpen] = useState<boolean>(false);
+  const [isShareModalOpen, setIsShareModalOpen] = useState<boolean>(false);
+
+  // Opponent threat arrow state
+  const [showOpponentThreat, setShowOpponentThreat] = useState<boolean>(false);
+
+  // Interactive Retry Mode State
+  const [isRetrying, setIsRetrying] = useState<boolean>(false);
+  const [retryStatus, setRetryStatus] = useState<'idle' | 'success' | 'incorrect'>('idle');
+  const [retryFeedback, setRetryFeedback] = useState<string>('');
+  const [showRetryHint, setShowRetryHint] = useState<boolean>(false);
 
   const playTimerRef = useRef<number | null>(null);
 
   // Run Stockfish 19 Game Review
-  const runGameReview = useCallback(async (game: ChessComGame) => {
-    setIsAnalyzing(true);
-    setAnalysisProgress(0);
-    setIsPlaying(false);
+  const runGameReview = useCallback(
+    async (game: ChessComGame, depth = analysisDepth) => {
+      setIsAnalyzing(true);
+      setAnalysisProgress(0);
+      setIsPlaying(false);
+      setIsRetrying(false);
+      setRetryStatus('idle');
+      setShowRetryHint(false);
 
-    try {
-      const result = await stockfishEngine.reviewGame(
-        game.pgn,
-        (progress) => {
-          setAnalysisProgress(progress);
-        }
-      );
-      setReviewResult(result);
-      setCurrentPly(0);
-    } catch (err) {
-      console.error('Error reviewing game with Stockfish 19:', err);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }, []);
+      try {
+        const result = await stockfishEngine.reviewGame(
+          game.pgn,
+          (progress) => {
+            setAnalysisProgress(progress);
+          },
+          depth
+        );
+        setReviewResult(result);
+        setCurrentPly(0);
+      } catch (err) {
+        console.error('Error reviewing game with Stockfish 19:', err);
+      } finally {
+        setIsAnalyzing(false);
+      }
+    },
+    [analysisDepth]
+  );
 
-  // Trigger review on game selection
+  // Trigger review on game selection or depth change
   useEffect(() => {
-    runGameReview(selectedGame);
-  }, [selectedGame, runGameReview]);
+    runGameReview(selectedGame, analysisDepth);
+  }, [selectedGame, analysisDepth, runGameReview]);
 
   // Derive FEN for current ply
   const currentFen = React.useMemo(() => {
@@ -81,6 +100,9 @@ export default function App() {
     (newPly: number) => {
       const clamped = Math.max(0, Math.min(newPly, reviewResult?.moves.length || 0));
       setCurrentPly(clamped);
+      setIsRetrying(false);
+      setRetryStatus('idle');
+      setShowRetryHint(false);
 
       if (clamped > 0 && reviewResult?.moves[clamped - 1]) {
         const move = reviewResult.moves[clamped - 1];
@@ -199,6 +221,39 @@ export default function App() {
     }
   };
 
+  // Retry Handlers
+  const handleStartRetry = () => {
+    setIsRetrying(true);
+    setRetryStatus('idle');
+    setRetryFeedback('');
+    setShowRetryHint(false);
+  };
+
+  const handleCancelRetry = () => {
+    setIsRetrying(false);
+    setRetryStatus('idle');
+    setShowRetryHint(false);
+  };
+
+  const handleRetryAttempt = (isCorrect: boolean, playedSan: string) => {
+    if (isCorrect) {
+      setRetryStatus('success');
+      setRetryFeedback('');
+    } else {
+      setRetryStatus('incorrect');
+      setRetryFeedback(`${playedSan} is not the optimal engine move`);
+    }
+  };
+
+  const handleShowHint = () => {
+    setShowRetryHint(true);
+  };
+
+  const handleRevealBestMove = () => {
+    setRetryStatus('success');
+    setShowRetryHint(false);
+  };
+
   const handleToggleSound = () => {
     const newState = !soundEnabled;
     setSoundEnabled(newState);
@@ -254,6 +309,10 @@ export default function App() {
                   isFlipped={isFlipped}
                   currentMoveReview={currentMoveReview}
                   showBestMoveArrow={true}
+                  showOpponentThreat={showOpponentThreat}
+                  isRetrying={isRetrying}
+                  onRetryAttempt={handleRetryAttempt}
+                  showRetryHint={showRetryHint}
                 />
               </div>
             </div>
@@ -270,6 +329,18 @@ export default function App() {
               onTogglePlay={() => setIsPlaying((p) => !p)}
               onJumpToNextError={jumpToNextError}
               onJumpToNextBrilliant={jumpToNextBrilliant}
+              showOpponentThreat={showOpponentThreat}
+              onToggleOpponentThreat={() => setShowOpponentThreat((prev) => !prev)}
+              isRetrying={isRetrying}
+              onStartRetry={handleStartRetry}
+              onCancelRetry={handleCancelRetry}
+              onShowHint={handleShowHint}
+              onRevealBestMove={handleRevealBestMove}
+              retryStatus={retryStatus}
+              retryFeedback={retryFeedback}
+              analysisDepth={analysisDepth}
+              onChangeDepth={(d) => setAnalysisDepth(d)}
+              onOpenShareModal={() => setIsShareModalOpen(true)}
             />
           </div>
         </div>
@@ -280,6 +351,16 @@ export default function App() {
         isOpen={isInstallModalOpen}
         onClose={() => setIsInstallModalOpen(false)}
       />
+
+      {/* Share Review Card & Annotated PGN Exporter Modal */}
+      {reviewResult && (
+        <ShareReviewCardModal
+          isOpen={isShareModalOpen}
+          onClose={() => setIsShareModalOpen(false)}
+          game={selectedGame}
+          reviewResult={reviewResult}
+        />
+      )}
     </div>
   );
 }

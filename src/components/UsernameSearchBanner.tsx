@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Search, Loader2, Sparkles, Globe, Swords, CheckCircle2, AlertCircle } from 'lucide-react';
 import { ChessComGame } from '../types/chess';
-import { fetchChessComGames, FEATURED_GAMES } from '../services/chesscomApi';
+import { fetchChessComGames, fetchGameByUrlOrPgn, FEATURED_GAMES } from '../services/chesscomApi';
 
 interface UsernameSearchBannerProps {
   currentUsername: string;
@@ -23,17 +23,37 @@ export const UsernameSearchBanner: React.FC<UsernameSearchBannerProps> = ({
   const [isExpanded, setIsExpanded] = useState(false);
 
   const handleFetch = async (targetUser: string) => {
-    const user = targetUser.trim();
-    if (!user) return;
+    const input = targetUser.trim();
+    if (!input) return;
     setIsLoading(true);
     setError(null);
-    setIsExpanded(true);
 
+    // Check if input is a direct game URL (Chess.com or Lichess) or raw PGN
+    if (
+      input.includes('chess.com') ||
+      input.includes('lichess.org') ||
+      input.startsWith('[') ||
+      input.match(/^1\.\s*[a-zA-Z]/)
+    ) {
+      try {
+        const game = await fetchGameByUrlOrPgn(input);
+        onSelectGame(game);
+        setIsExpanded(false);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'Failed to import game from URL/PGN';
+        setError(msg);
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    setIsExpanded(true);
     try {
-      const fetched = await fetchChessComGames(user);
+      const fetched = await fetchChessComGames(input);
       setGames(fetched);
       if (fetched.length === 0) {
-        setError(`No recent games found for "${user}".`);
+        setError(`No recent games found for "${input}".`);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to fetch games from Chess.com';
@@ -60,7 +80,7 @@ export const UsernameSearchBanner: React.FC<UsernameSearchBannerProps> = ({
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleFetch(username)}
-              placeholder="Enter Chess.com username (e.g. hikaru, magnuscarlsen...)"
+              placeholder="Enter Chess.com username, game URL (Chess.com / Lichess), or paste PGN..."
               className="w-full rounded-xl bg-slate-950 border border-slate-700 focus:border-cyan-400 focus:ring-1 focus:ring-cyan-400 px-3.5 py-2 text-xs sm:text-sm text-white placeholder-slate-500 font-mono transition"
             />
           </div>
@@ -72,7 +92,7 @@ export const UsernameSearchBanner: React.FC<UsernameSearchBannerProps> = ({
               className="flex-1 sm:flex-none flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-cyan-500/20 active:scale-95 transition"
             >
               {isLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-              <span>Fetch Games</span>
+              <span>Load Game</span>
             </button>
 
             <button

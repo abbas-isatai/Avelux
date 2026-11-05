@@ -13,6 +13,17 @@ import {
   BarChart2,
   TrendingUp,
   Layers,
+  Crosshair,
+  ShieldAlert,
+  Share2,
+  Settings,
+  BookOpen,
+  CheckCircle2,
+  XCircle,
+  Lightbulb,
+  Award,
+  Sparkles,
+  Volume2,
 } from 'lucide-react';
 import {
   MoveReview,
@@ -21,6 +32,7 @@ import {
   CLASSIFICATIONS_CONFIG,
   MoveClassification,
 } from '../types/chess';
+import { sounds, SoundPack } from '../services/soundEffects';
 
 interface GameReviewPanelProps {
   game: ChessComGame;
@@ -31,6 +43,21 @@ interface GameReviewPanelProps {
   onTogglePlay: () => void;
   onJumpToNextError: () => void;
   onJumpToNextBrilliant: () => void;
+  // Threat Arrow
+  showOpponentThreat: boolean;
+  onToggleOpponentThreat: () => void;
+  // Interactive Retry Mode
+  isRetrying: boolean;
+  onStartRetry: () => void;
+  onCancelRetry: () => void;
+  onShowHint: () => void;
+  onRevealBestMove: () => void;
+  retryStatus: 'idle' | 'success' | 'incorrect';
+  retryFeedback: string;
+  // Depth & Sound Settings
+  analysisDepth: number;
+  onChangeDepth: (depth: number) => void;
+  onOpenShareModal: () => void;
 }
 
 export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
@@ -42,20 +69,56 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
   onTogglePlay,
   onJumpToNextError,
   onJumpToNextBrilliant,
+  showOpponentThreat,
+  onToggleOpponentThreat,
+  isRetrying,
+  onStartRetry,
+  onCancelRetry,
+  onShowHint,
+  onRevealBestMove,
+  retryStatus,
+  retryFeedback,
+  analysisDepth,
+  onChangeDepth,
+  onOpenShareModal,
 }) => {
-  const [activeTab, setActiveTab] = useState<'review' | 'moves' | 'stats'>('review');
+  const [activeTab, setActiveTab] = useState<'review' | 'keymoments' | 'moves' | 'stats'>('review');
+  const [showSettings, setShowSettings] = useState(false);
+  const [soundPack, setSoundPack] = useState<SoundPack>(sounds.soundPack);
 
   const moves = reviewResult?.moves || [];
   const currentMove = currentPly > 0 && currentPly <= moves.length ? moves[currentPly - 1] : null;
   const currentBadge = currentMove ? CLASSIFICATIONS_CONFIG[currentMove.classification] : null;
+
+  const isCurrentError =
+    currentMove &&
+    (currentMove.classification === 'blunder' ||
+      currentMove.classification === 'mistake' ||
+      currentMove.classification === 'miss' ||
+      currentMove.classification === 'inaccuracy');
 
   const formatEval = (cp: number) => {
     const val = (Math.abs(cp) / 100).toFixed(1);
     return cp > 0 ? `+${val}` : cp < 0 ? `-${val}` : '0.0';
   };
 
+  const handleSoundPackChange = (pack: SoundPack) => {
+    setSoundPack(pack);
+    sounds.setSoundPack(pack);
+    sounds.playMove();
+  };
+
+  // Extract key moments list
+  const keyMomentMoves = React.useMemo(() => {
+    if (!reviewResult) return [];
+    const plies = reviewResult.keyMomentPlies || [];
+    return plies
+      .map((p) => reviewResult.moves[p - 1])
+      .filter((m): m is MoveReview => !!m);
+  }, [reviewResult]);
+
   return (
-    <div className="flex flex-col w-full h-full max-h-[760px] bg-[#0B0F17] rounded-2xl border border-slate-800 shadow-2xl overflow-hidden text-slate-100">
+    <div className="flex flex-col w-full h-full max-h-[780px] bg-[#0B0F17] rounded-2xl border border-slate-800 shadow-2xl overflow-hidden text-slate-100">
       {/* 1. Player Matchup & Accuracy Header */}
       <div className="p-3.5 sm:p-4 border-b border-slate-800 bg-[#0F172A]/80 backdrop-blur-md">
         <div className="flex items-center justify-between gap-3">
@@ -69,16 +132,34 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
                 {game.white.username}
               </div>
               <div className="text-[11px] text-slate-400 font-mono">
-                {game.white.rating} • {game.white.result}
+                {game.white.rating}
+                {reviewResult && (
+                  <span className="text-emerald-400 font-bold ml-1.5">
+                    (Est. {reviewResult.white.estimatedElo})
+                  </span>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Time control badge */}
-          <div className="flex flex-col items-center px-2 py-1 rounded-lg bg-slate-950 border border-slate-800 shrink-0">
-            <span className="text-[10px] font-mono text-cyan-400 font-bold uppercase tracking-wider">
-              {game.timeControl}
-            </span>
+          {/* Action Tools: Share & Settings */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={onOpenShareModal}
+              className="p-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold flex items-center gap-1 transition"
+              title="Share Review Card & Download Annotated PGN"
+            >
+              <Share2 className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Share</span>
+            </button>
+
+            <button
+              onClick={() => setShowSettings(!showSettings)}
+              className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition"
+              title="Review Engine Settings & Depth"
+            >
+              <Settings className="h-3.5 w-3.5" />
+            </button>
           </div>
 
           {/* Black Player */}
@@ -88,7 +169,12 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
                 {game.black.username}
               </div>
               <div className="text-[11px] text-slate-400 font-mono">
-                {game.black.rating} • {game.black.result}
+                {game.black.rating}
+                {reviewResult && (
+                  <span className="text-cyan-400 font-bold ml-1.5">
+                    (Est. {reviewResult.black.estimatedElo})
+                  </span>
+                )}
               </div>
             </div>
             <div className="h-8 w-8 rounded-xl bg-[#030712] border border-slate-700 text-slate-200 font-black flex items-center justify-center text-xs shrink-0 ring-2 ring-slate-800 shadow-md">
@@ -97,10 +183,82 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
           </div>
         </div>
 
+        {/* Opening Name & ECO Code Banner */}
+        {reviewResult?.opening && (
+          <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-1.5 text-slate-300 truncate">
+              <BookOpen className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+              <span className="font-mono font-bold text-amber-400 text-[11px]">{reviewResult.opening.eco}</span>
+              <span className="font-medium text-[11px] truncate text-slate-200">
+                {reviewResult.opening.name}
+                {reviewResult.opening.variation ? `: ${reviewResult.opening.variation}` : ''}
+              </span>
+            </div>
+            <span className="text-[10px] font-mono text-cyan-400 uppercase tracking-wider shrink-0 ml-2">
+              {game.timeControl}
+            </span>
+          </div>
+        )}
+
+        {/* Settings Flyout Drawer */}
+        {showSettings && (
+          <div className="mt-3 p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2.5 animate-fade-in text-xs">
+            {/* Analysis Depth Selector */}
+            <div className="flex items-center justify-between">
+              <span className="text-slate-400 font-medium flex items-center gap-1.5">
+                <Cpu className="h-3.5 w-3.5 text-cyan-400" />
+                Stockfish 19 Depth:
+              </span>
+              <div className="flex items-center gap-1">
+                {[
+                  { depth: 8, label: 'Fast (8)' },
+                  { depth: 10, label: 'Standard (10)' },
+                  { depth: 14, label: 'Deep (14)' },
+                ].map((d) => (
+                  <button
+                    key={d.depth}
+                    onClick={() => onChangeDepth(d.depth)}
+                    className={`px-2 py-1 rounded text-[10px] font-bold border transition ${
+                      analysisDepth === d.depth
+                        ? 'bg-cyan-500/25 border-cyan-400 text-cyan-300'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {d.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Sound Pack Selector */}
+            <div className="flex items-center justify-between border-t border-slate-900 pt-2">
+              <span className="text-slate-400 font-medium flex items-center gap-1.5">
+                <Volume2 className="h-3.5 w-3.5 text-emerald-400" />
+                Sound Pack:
+              </span>
+              <div className="flex items-center gap-1">
+                {(['chesscom', 'lichess', 'mechanical', 'retro'] as SoundPack[]).map((pack) => (
+                  <button
+                    key={pack}
+                    onClick={() => handleSoundPackChange(pack)}
+                    className={`px-2 py-1 rounded text-[10px] font-bold uppercase border transition ${
+                      soundPack === pack
+                        ? 'bg-emerald-500/25 border-emerald-400 text-emerald-300'
+                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {pack}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* CAPS Accuracy Meters */}
         {reviewResult && (
-          <div className="mt-3 pt-2.5 border-t border-slate-800/80">
-            <div className="flex items-center justify-between text-xs font-mono font-bold mb-1.5">
+          <div className="mt-2.5 pt-2 border-t border-slate-800/80">
+            <div className="flex items-center justify-between text-xs font-mono font-bold mb-1">
               <span className="text-emerald-400 font-extrabold text-sm">
                 {reviewResult.white.accuracy}% <span className="text-[10px] font-sans text-slate-400 font-normal">Accuracy</span>
               </span>
@@ -111,7 +269,7 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
                 <span className="text-[10px] font-sans text-slate-400 font-normal">Accuracy</span> {reviewResult.black.accuracy}%
               </span>
             </div>
-            <div className="flex h-2.5 w-full rounded-full overflow-hidden bg-slate-950 p-0.5 gap-1 border border-slate-800">
+            <div className="flex h-2 w-full rounded-full overflow-hidden bg-slate-950 p-0.5 gap-1 border border-slate-800">
               <div
                 className="h-full rounded-l-full bg-gradient-to-r from-emerald-500 to-emerald-400 transition-all duration-300"
                 style={{
@@ -130,10 +288,10 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
       </div>
 
       {/* 2. Clean Navigation Tabs */}
-      <div className="flex items-center border-b border-slate-800 bg-[#070A10] px-3 pt-1 gap-1">
+      <div className="flex items-center border-b border-slate-800 bg-[#070A10] px-2 pt-1 gap-1 overflow-x-auto scrollbar-none">
         <button
           onClick={() => setActiveTab('review')}
-          className={`flex items-center gap-1.5 py-2.5 px-3.5 text-xs font-bold border-b-2 transition ${
+          className={`flex items-center gap-1.5 py-2 px-3 text-xs font-bold border-b-2 shrink-0 transition ${
             activeTab === 'review'
               ? 'border-cyan-400 text-cyan-400 bg-cyan-500/10'
               : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -144,8 +302,20 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
         </button>
 
         <button
+          onClick={() => setActiveTab('keymoments')}
+          className={`flex items-center gap-1.5 py-2 px-3 text-xs font-bold border-b-2 shrink-0 transition ${
+            activeTab === 'keymoments'
+              ? 'border-amber-400 text-amber-400 bg-amber-500/10'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          <span>Key Moments ({keyMomentMoves.length})</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('moves')}
-          className={`flex items-center gap-1.5 py-2.5 px-3.5 text-xs font-bold border-b-2 transition ${
+          className={`flex items-center gap-1.5 py-2 px-3 text-xs font-bold border-b-2 shrink-0 transition ${
             activeTab === 'moves'
               ? 'border-cyan-400 text-cyan-400 bg-cyan-500/10'
               : 'border-transparent text-slate-400 hover:text-slate-200'
@@ -157,14 +327,14 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
 
         <button
           onClick={() => setActiveTab('stats')}
-          className={`flex items-center gap-1.5 py-2.5 px-3.5 text-xs font-bold border-b-2 transition ${
+          className={`flex items-center gap-1.5 py-2 px-3 text-xs font-bold border-b-2 shrink-0 transition ${
             activeTab === 'stats'
               ? 'border-cyan-400 text-cyan-400 bg-cyan-500/10'
               : 'border-transparent text-slate-400 hover:text-slate-200'
           }`}
         >
           <BarChart2 className="h-3.5 w-3.5" />
-          <span>Move Counts</span>
+          <span>Stats & Coach</span>
         </button>
       </div>
 
@@ -250,16 +420,108 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
                     </div>
                   )}
 
-                  {/* Clean explanation */}
+                  {/* Move Description */}
                   <div className="text-xs text-slate-300 pt-0.5 leading-relaxed">
                     {currentBadge.description}
                   </div>
                 </div>
+
+                {/* Threat Refutation preview if available */}
+                {currentMove.opponentThreatSan && (
+                  <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-1.5 text-slate-400">
+                      <ShieldAlert className="h-3.5 w-3.5 text-red-400" />
+                      <span>Opponent Refutation:</span>
+                      <span className="font-mono font-bold text-red-400">{currentMove.opponentThreatSan}</span>
+                    </div>
+
+                    <button
+                      onClick={onToggleOpponentThreat}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold border transition ${
+                        showOpponentThreat
+                          ? 'bg-red-500/30 border-red-500 text-red-300 shadow-sm'
+                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {showOpponentThreat ? 'Hide Threat Arrow' : 'Show Threat Arrow'}
+                    </button>
+                  </div>
+                )}
+
+                {/* Interactive Retry Prompt for Blunders/Mistakes/Misses */}
+                {isCurrentError && (
+                  <div className="mt-3.5 pt-3 border-t border-slate-700/60 space-y-2">
+                    {!isRetrying ? (
+                      <button
+                        onClick={onStartRetry}
+                        className="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-extrabold text-xs shadow-lg shadow-orange-500/20 active:scale-98 transition"
+                      >
+                        <Crosshair className="h-4 w-4" />
+                        <span>Retry Move: Can You Find the Best Move?</span>
+                      </button>
+                    ) : (
+                      <div className="p-3 rounded-xl bg-slate-950 border border-amber-500/50 space-y-2.5 animate-fade-in">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-xs text-amber-300 flex items-center gap-1.5">
+                            <Crosshair className="h-4 w-4 animate-spin text-amber-400" />
+                            Find Stockfish's Move
+                          </span>
+                          <button
+                            onClick={onCancelRetry}
+                            className="text-[11px] text-slate-400 hover:text-white transition"
+                          >
+                            Exit Retry
+                          </button>
+                        </div>
+
+                        {retryStatus === 'idle' && (
+                          <p className="text-xs text-slate-300">
+                            Move the piece directly on the board to test your candidate line!
+                          </p>
+                        )}
+
+                        {retryStatus === 'success' && (
+                          <div className="p-2 rounded-lg bg-emerald-500/20 border border-emerald-500 text-emerald-300 text-xs flex items-center gap-2">
+                            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                            <span>
+                              <strong>Brilliant find!</strong> That was Stockfish's best move!
+                            </span>
+                          </div>
+                        )}
+
+                        {retryStatus === 'incorrect' && (
+                          <div className="p-2 rounded-lg bg-rose-500/20 border border-rose-500 text-rose-300 text-xs flex items-center gap-2">
+                            <XCircle className="h-4 w-4 text-rose-400 shrink-0" />
+                            <span>
+                              <strong>Incorrect!</strong> {retryFeedback || 'That move does not solve the tactical issue.'}
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-2 pt-1">
+                          <button
+                            onClick={onShowHint}
+                            className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-cyan-300 text-[11px] font-bold border border-slate-800 transition"
+                          >
+                            <Lightbulb className="h-3.5 w-3.5 text-cyan-400" />
+                            <span>Show Hint</span>
+                          </button>
+                          <button
+                            onClick={onRevealBestMove}
+                            className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-emerald-300 text-[11px] font-bold border border-slate-800 transition"
+                          >
+                            <span>Reveal Best Move</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="p-6 text-center rounded-2xl bg-slate-900/50 border border-slate-800 text-slate-400 text-xs space-y-2">
                 <div className="font-semibold text-slate-200">Start of Game (Move 0)</div>
-                <div>Press <strong>Next</strong> or <strong>Play</strong> to review the first move with Stockfish 19.</div>
+                <div>Press <strong>Next</strong> or <strong>Auto Play</strong> to review the first move with Stockfish 19.</div>
               </div>
             )}
 
@@ -267,14 +529,14 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
             <div className="grid grid-cols-2 gap-2 pt-1">
               <button
                 onClick={onJumpToNextError}
-                className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-bold transition active:scale-95 shadow-sm"
+                className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-bold transition active:scale-95 shadow-sm"
               >
                 <AlertTriangle className="h-4 w-4" />
                 <span>Next Error / Blunder</span>
               </button>
               <button
                 onClick={onJumpToNextBrilliant}
-                className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-xs font-bold transition active:scale-95 shadow-sm"
+                className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-xs font-bold transition active:scale-95 shadow-sm"
               >
                 <Zap className="h-4 w-4" />
                 <span>Next Brilliant (!!)</span>
@@ -293,7 +555,7 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
                     Move {currentPly} / {moves.length}
                   </span>
                 </div>
-                <div className="h-16 w-full flex items-center gap-[2px] pt-1">
+                <div className="h-14 w-full flex items-center gap-[2px] pt-1">
                   {reviewResult.evalGraph.map((item, idx) => {
                     const clamped = Math.max(-800, Math.min(800, item.evalWhite));
                     const heightPercent = Math.min(100, Math.max(8, (Math.abs(clamped) / 800) * 100));
@@ -328,7 +590,66 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
           </div>
         )}
 
-        {/* Tab 2: Full Move List */}
+        {/* Tab 2: Key Moments (Storyline) */}
+        {activeTab === 'keymoments' && (
+          <div className="space-y-2">
+            <div className="text-xs font-bold text-amber-300 flex items-center gap-1.5 mb-2">
+              <Sparkles className="h-4 w-4 text-amber-400" />
+              Decisive Turning Points ({keyMomentMoves.length})
+            </div>
+
+            {keyMomentMoves.length === 0 ? (
+              <div className="p-6 text-center text-xs text-slate-400 bg-slate-900/50 rounded-xl border border-slate-800">
+                No major tactical turning points detected. Both players maintained high accuracy!
+              </div>
+            ) : (
+              keyMomentMoves.map((m) => {
+                const badge = CLASSIFICATIONS_CONFIG[m.classification];
+                const isSelected = m.ply === currentPly;
+
+                return (
+                  <button
+                    key={m.ply}
+                    onClick={() => onSelectPly(m.ply)}
+                    className={`w-full text-left p-3 rounded-xl border transition flex items-center justify-between gap-3 ${
+                      isSelected
+                        ? 'bg-slate-800 border-cyan-400 ring-2 ring-cyan-400/40'
+                        : 'bg-slate-900/70 border-slate-800 hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div
+                        className={`w-7 h-7 rounded-lg flex items-center justify-center font-black text-xs border shrink-0 ${badge.bgColor} ${badge.borderColor} ${badge.textColor}`}
+                      >
+                        {badge.symbol}
+                      </div>
+
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-white font-mono flex items-center gap-1.5">
+                          <span>
+                            {m.moveNumber}.{m.color === 'b' ? '..' : ''} {m.san}
+                          </span>
+                          <span className={`text-[10px] font-sans font-bold uppercase ${badge.textColor}`}>
+                            • {badge.label}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-400 truncate">
+                          Eval: {formatEval(m.evalAfter)} • Best was {m.bestMoveSan}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="text-right shrink-0">
+                      <span className="text-[11px] font-mono text-slate-400">Ply {m.ply}</span>
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        )}
+
+        {/* Tab 3: Full Move List */}
         {activeTab === 'moves' && (
           <div className="space-y-1 font-mono text-xs">
             {moves.reduce<Array<{ moveNum: number; white?: MoveReview; black?: MoveReview }>>((acc, move) => {
@@ -402,9 +723,34 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
           </div>
         )}
 
-        {/* Tab 3: Move Classification Stats */}
+        {/* Tab 4: Move Classification Stats & Coach Persona */}
         {activeTab === 'stats' && reviewResult && (
-          <div className="space-y-3">
+          <div className="space-y-3.5">
+            {/* Coach ELO Ratings */}
+            <div className="p-3.5 rounded-2xl bg-gradient-to-r from-slate-900 to-slate-950 border border-slate-800 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-slate-300 flex items-center gap-1.5">
+                  <Award className="h-4 w-4 text-emerald-400" />
+                  Performance Rating (Coach ELO)
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-center pt-1">
+                <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800">
+                  <div className="text-[11px] text-slate-400 font-medium">White Est. Rating</div>
+                  <div className="text-xl font-black text-emerald-400">{reviewResult.white.estimatedElo}</div>
+                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">{reviewResult.white.accuracy}% accuracy</div>
+                </div>
+                <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800">
+                  <div className="text-[11px] text-slate-400 font-medium">Black Est. Rating</div>
+                  <div className="text-xl font-black text-cyan-400">{reviewResult.black.estimatedElo}</div>
+                  <div className="text-[10px] text-slate-500 font-mono mt-0.5">{reviewResult.black.accuracy}% accuracy</div>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-300 italic pt-1 leading-relaxed">
+                "{reviewResult.white.coachSummary || reviewResult.black.coachSummary}"
+              </p>
+            </div>
+
             <div className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
               <BarChart2 className="h-4 w-4 text-cyan-400" />
               Move Classification Counts
@@ -432,7 +778,7 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
                 return (
                   <div
                     key={type}
-                    className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs"
+                    className="flex items-center justify-between p-2 rounded-xl bg-slate-900/60 border border-slate-800 text-xs"
                   >
                     <div className="flex items-center gap-2">
                       <span

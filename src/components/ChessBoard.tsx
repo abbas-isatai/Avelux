@@ -1,13 +1,21 @@
 import React, { useMemo, useState } from 'react';
 import { Chess, Square } from 'chess.js';
-import { Palette } from 'lucide-react';
+import { Palette, Sparkles, HelpCircle } from 'lucide-react';
 import { MoveReview, CLASSIFICATIONS_CONFIG } from '../types/chess';
+import { sounds } from '../services/soundEffects';
+
+export type PieceSetId = 'cburnett' | 'neo' | 'alpha' | 'staunty';
 
 interface ChessBoardProps {
   fen: string;
   isFlipped: boolean;
   currentMoveReview?: MoveReview;
   showBestMoveArrow?: boolean;
+  showOpponentThreat?: boolean;
+  // Interactive Retry Mode Props
+  isRetrying?: boolean;
+  onRetryAttempt?: (isCorrect: boolean, playedSan: string) => void;
+  showRetryHint?: boolean;
 }
 
 export type BoardThemeId = 'green' | 'wood' | 'ice';
@@ -56,10 +64,11 @@ const BOARD_THEMES: Record<BoardThemeId, BoardTheme> = {
   },
 };
 
-// Helper to get standard official Staunton vector piece URL
-const getPieceUrl = (color: string, type: string): string => {
-  const code = `${color}${type.toUpperCase()}`;
-  return `/pieces/${code}.svg`;
+const PIECE_SET_NAMES: Record<PieceSetId, string> = {
+  cburnett: 'Classic Staunton',
+  neo: 'Modern Neo',
+  alpha: 'Alpha Traditional',
+  staunty: 'Staunty Wood',
 };
 
 export const ChessBoard: React.FC<ChessBoardProps> = ({
@@ -67,18 +76,57 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   isFlipped,
   currentMoveReview,
   showBestMoveArrow = true,
+  showOpponentThreat = false,
+  isRetrying = false,
+  onRetryAttempt,
+  showRetryHint = false,
 }) => {
-  const [themeId, setThemeId] = useState<BoardThemeId>('green');
+  const [themeId, setThemeId] = useState<BoardThemeId>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('avelux_board_theme') as BoardThemeId | null;
+      if (saved && BOARD_THEMES[saved]) return saved;
+    }
+    return 'green';
+  });
+
+  const [pieceSet, setPieceSet] = useState<PieceSetId>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('avelux_piece_set') as PieceSetId | null;
+      if (saved && PIECE_SET_NAMES[saved]) return saved;
+    }
+    return 'cburnett';
+  });
+
+  // State for interactive piece selection in Retry Mode
+  const [selectedSquare, setSelectedSquare] = useState<Square | null>(null);
+  const [retryBoardFen, setRetryBoardFen] = useState<string | null>(null);
+
   const theme = BOARD_THEMES[themeId];
 
-  const board = useMemo(() => {
-    try {
-      const chess = new Chess(fen);
-      return chess.board();
-    } catch {
-      return new Chess().board();
+  // Active FEN: in retry mode, defaults to fenBefore unless user played a move
+  const activeFen = useMemo(() => {
+    if (isRetrying) {
+      return retryBoardFen || currentMoveReview?.fenBefore || fen;
     }
-  }, [fen]);
+    return fen;
+  }, [isRetrying, retryBoardFen, currentMoveReview, fen]);
+
+  const chess = useMemo(() => {
+    try {
+      return new Chess(activeFen);
+    } catch {
+      return new Chess();
+    }
+  }, [activeFen]);
+
+  const board = useMemo(() => chess.board(), [chess]);
+
+  // Legal moves for selected piece in retry mode
+  const legalDestinations = useMemo(() => {
+    if (!isRetrying || !selectedSquare) return new Set<string>();
+    const moves = chess.moves({ square: selectedSquare, verbose: true });
+    return new Set(moves.map((m) => m.to));
+  }, [isRetrying, selectedSquare, chess]);
 
   const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
   const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
@@ -94,7 +142,9 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     return [(fIdx + 0.5) * 12.5, (rIdx + 0.5) * 12.5];
   };
 
+  // Best move arrow
   const bestMoveArrow = useMemo(() => {
+    if (isRetrying) return null; // Don't give away the solution in retry mode
     if (!showBestMoveArrow || !currentMoveReview?.bestMoveUci) return null;
     const uci = currentMoveReview.bestMoveUci;
     if (uci.length < 4) return null;
@@ -105,25 +155,110 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     const [x1, y1] = squareToPercent(fromSq);
     const [x2, y2] = squareToPercent(toSq);
     return { fromSq, toSq, x1, y1, x2, y2 };
-  }, [showBestMoveArrow, currentMoveReview, displayFiles, displayRanks]);
+  }, [showBestMoveArrow, currentMoveReview, displayFiles, displayRanks, isRetrying]);
+
+  // Opponent threat arrow
+  const threatArrow = useMemo(() => {
+    if (!showOpponentThreat || !currentMoveReview?.opponentThreatUci) return null;
+    const uci = currentMoveReview.opponentThreatUci;
+    if (uci.length < 4) return null;
+    const fromSq = uci.substring(0, 2);
+    const toSq = uci.substring(2, 4);
+    if (!displayFiles.includes(fromSq[0]) || !displayFiles.includes(toSq[0])) return null;
+
+    const [x1, y1] = squareToPercent(fromSq);
+    const [x2, y2] = squareToPercent(toSq);
+    return { fromSq, toSq, x1, y1, x2, y2 };
+  }, [showOpponentThreat, currentMoveReview, displayFiles, displayRanks]);
 
   const playedMove = useMemo(() => {
+    if (isRetrying) return null;
     if (!currentMoveReview?.from || !currentMoveReview?.to) return null;
     return {
       from: currentMoveReview.from,
       to: currentMoveReview.to,
       classification: currentMoveReview.classification,
     };
-  }, [currentMoveReview]);
+  }, [currentMoveReview, isRetrying]);
 
   const badgeConfig = currentMoveReview ? CLASSIFICATIONS_CONFIG[currentMoveReview.classification] : null;
 
+  // Best move origin square for hints
+  const hintOriginSquare = useMemo(() => {
+    if (showRetryHint && currentMoveReview?.bestMoveUci) {
+      return currentMoveReview.bestMoveUci.substring(0, 2);
+    }
+    return null;
+  }, [showRetryHint, currentMoveReview]);
+
+  const handleSquareClick = (sq: Square) => {
+    if (!isRetrying || !currentMoveReview) return;
+
+    const sideToMove = chess.turn();
+    const pieceOnSquare = chess.get(sq);
+
+    // If selecting own piece
+    if (pieceOnSquare && pieceOnSquare.color === sideToMove) {
+      setSelectedSquare(sq);
+      return;
+    }
+
+    // If attempting a move from previously selected square
+    if (selectedSquare) {
+      const from = selectedSquare;
+      const to = sq;
+
+      try {
+        const testChess = new Chess(chess.fen());
+        const moveRes = testChess.move({ from, to, promotion: 'q' });
+
+        if (moveRes) {
+          const playedUci = `${from}${to}${moveRes.promotion || ''}`;
+          const isCorrect =
+            playedUci === currentMoveReview.bestMoveUci ||
+            moveRes.san === currentMoveReview.bestMoveSan ||
+            (currentMoveReview.bestMoveUci.startsWith(`${from}${to}`));
+
+          if (isCorrect) {
+            sounds.playCorrectMove();
+            setRetryBoardFen(testChess.fen());
+            if (onRetryAttempt) onRetryAttempt(true, moveRes.san);
+          } else {
+            sounds.playWrongMove();
+            if (onRetryAttempt) onRetryAttempt(false, moveRes.san);
+          }
+          setSelectedSquare(null);
+          return;
+        }
+      } catch {
+        // Not a legal move
+      }
+
+      setSelectedSquare(null);
+    }
+  };
+
   const cycleTheme = () => {
     setThemeId((prev) => {
-      if (prev === 'green') return 'wood';
-      if (prev === 'wood') return 'ice';
-      return 'green';
+      const next: BoardThemeId = prev === 'green' ? 'wood' : prev === 'wood' ? 'ice' : 'green';
+      if (typeof window !== 'undefined') localStorage.setItem('avelux_board_theme', next);
+      return next;
     });
+  };
+
+  const cyclePieceSet = () => {
+    setPieceSet((prev) => {
+      const sets: PieceSetId[] = ['cburnett', 'neo', 'alpha', 'staunty'];
+      const nextIdx = (sets.indexOf(prev) + 1) % sets.length;
+      const next = sets[nextIdx];
+      if (typeof window !== 'undefined') localStorage.setItem('avelux_piece_set', next);
+      return next;
+    });
+  };
+
+  const getPieceUrl = (color: string, type: string): string => {
+    const code = `${color}${type.toUpperCase()}`;
+    return `/pieces/${pieceSet}/${code}.svg`;
   };
 
   return (
@@ -142,16 +277,25 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
               const isFrom = playedMove?.from === sq;
               const isTo = playedMove?.to === sq;
               const isBestTo = bestMoveArrow?.toSq === sq && !isTo;
+              const isSelected = selectedSquare === sq;
+              const isLegalDest = legalDestinations.has(sq);
+              const isHintSquare = hintOriginSquare === sq;
+              const isThreatTo = threatArrow?.toSq === sq;
 
               return (
                 <div
                   key={sq}
                   data-square={sq}
+                  onClick={() => handleSquareClick(sq)}
                   className={`relative flex items-center justify-center transition-colors duration-150 ${
                     isDark ? theme.darkSquare : theme.lightSquare
-                  } ${isTo ? theme.highlightTo : isFrom ? theme.highlightFrom : ''}`}
+                  } ${isTo ? theme.highlightTo : isFrom ? theme.highlightFrom : ''} ${
+                    isSelected ? 'bg-amber-400/70 ring-4 ring-inset ring-amber-300' : ''
+                  } ${isHintSquare ? 'ring-4 ring-cyan-400 animate-pulse bg-cyan-400/30' : ''} ${
+                    isRetrying ? 'cursor-pointer hover:brightness-105' : ''
+                  }`}
                 >
-                  {/* Clean rank & file coordinates */}
+                  {/* Rank & file coordinates */}
                   {fIdx === 0 && (
                     <span
                       className={`absolute top-0.5 left-1 text-[9px] font-black font-mono select-none pointer-events-none ${
@@ -171,7 +315,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                     </span>
                   )}
 
-                  {/* Standard official piece rendering */}
+                  {/* Standard piece rendering */}
                   {piece && (
                     <div className="relative z-10 w-[88%] h-[88%] flex items-center justify-center filter drop-shadow-[0_2px_4px_rgba(0,0,0,0.5)]">
                       <img
@@ -181,15 +325,25 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                         draggable={false}
                         onError={(e) => {
                           const code = `${piece.color}${piece.type.toUpperCase()}`;
-                          (e.currentTarget as HTMLImageElement).src =
-                            `https://raw.githubusercontent.com/lichess-org/lila/master/public/piece/cburnett/${code}.svg`;
+                          (e.currentTarget as HTMLImageElement).src = `/pieces/${code}.svg`;
                         }}
                       />
                     </div>
                   )}
 
+                  {/* Legal move destination marker in retry mode */}
+                  {isLegalDest && (
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-20">
+                      {piece ? (
+                        <div className="w-full h-full border-4 border-emerald-400/80 rounded-full animate-pulse" />
+                      ) : (
+                        <div className="w-3.5 h-3.5 bg-emerald-500/80 rounded-full ring-2 ring-emerald-300 shadow-md" />
+                      )}
+                    </div>
+                  )}
+
                   {/* Floating Move Badge */}
-                  {isTo && badgeConfig && (
+                  {!isRetrying && isTo && badgeConfig && (
                     <div
                       className={`absolute -top-2 -right-2 z-30 flex items-center justify-center min-w-[22px] h-[22px] px-1 rounded-full text-[10px] font-black tracking-tight border shadow-lg ${badgeConfig.bgColor} ${badgeConfig.borderColor} ${badgeConfig.textColor} ${badgeConfig.glowColor} animate-bounce-short backdrop-blur-sm`}
                       title={`${badgeConfig.label} (${currentMoveReview?.cpLoss} CP Loss)`}
@@ -199,45 +353,62 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   )}
 
                   {/* Target dashed box for Best Move target square */}
-                  {isBestTo && showBestMoveArrow && (
+                  {isBestTo && showBestMoveArrow && !isRetrying && (
                     <div className="absolute inset-1 rounded-lg border-2 border-dashed border-emerald-500/90 pointer-events-none animate-pulse" />
+                  )}
+
+                  {/* Red target box for Opponent Threat */}
+                  {isThreatTo && showOpponentThreat && (
+                    <div className="absolute inset-1 rounded-lg border-2 border-red-500/90 bg-red-500/20 pointer-events-none animate-pulse" />
                   )}
                 </div>
               );
             })
           )}
 
-          {/* SVG Arrow Overlay for Best Move */}
-          {showBestMoveArrow && bestMoveArrow && (
-            <svg
-              className="absolute inset-0 w-full h-full pointer-events-none z-20"
-              viewBox="0 0 100 100"
-              preserveAspectRatio="none"
-            >
-              <defs>
-                <marker
-                  id="arrowhead-best"
-                  markerWidth="6"
-                  markerHeight="6"
-                  refX="4.5"
-                  refY="3"
-                  orient="auto"
-                >
-                  <polygon points="0 0.5, 5.5 3, 0 5.5" fill="#10B981" />
-                </marker>
+          {/* SVG Arrow Overlay for Best Move & Opponent Threat */}
+          <svg
+            className="absolute inset-0 w-full h-full pointer-events-none z-20"
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+          >
+            <defs>
+              <marker
+                id="arrowhead-best"
+                markerWidth="6"
+                markerHeight="6"
+                refX="4.5"
+                refY="3"
+                orient="auto"
+              >
+                <polygon points="0 0.5, 5.5 3, 0 5.5" fill="#10B981" />
+              </marker>
 
-                <marker
-                  id="arrowhead-brilliant"
-                  markerWidth="6"
-                  markerHeight="6"
-                  refX="4.5"
-                  refY="3"
-                  orient="auto"
-                >
-                  <polygon points="0 0.5, 5.5 3, 0 5.5" fill="#06B6D4" />
-                </marker>
-              </defs>
+              <marker
+                id="arrowhead-brilliant"
+                markerWidth="6"
+                markerHeight="6"
+                refX="4.5"
+                refY="3"
+                orient="auto"
+              >
+                <polygon points="0 0.5, 5.5 3, 0 5.5" fill="#06B6D4" />
+              </marker>
 
+              <marker
+                id="arrowhead-threat"
+                markerWidth="6"
+                markerHeight="6"
+                refX="4.5"
+                refY="3"
+                orient="auto"
+              >
+                <polygon points="0 0.5, 5.5 3, 0 5.5" fill="#EF4444" />
+              </marker>
+            </defs>
+
+            {/* Best Move Arrow (Green or Cyan) */}
+            {showBestMoveArrow && bestMoveArrow && !isRetrying && (
               <line
                 x1={bestMoveArrow.x1}
                 y1={bestMoveArrow.y1}
@@ -254,24 +425,56 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 }
                 filter="drop-shadow(0 0 4px rgba(16,185,129,0.7))"
               />
-            </svg>
-          )}
+            )}
+
+            {/* Opponent Punishment Threat Arrow (Crimson Red) */}
+            {showOpponentThreat && threatArrow && (
+              <line
+                x1={threatArrow.x1}
+                y1={threatArrow.y1}
+                x2={threatArrow.x2}
+                y2={threatArrow.y2}
+                stroke="#EF4444"
+                strokeWidth="3.2"
+                strokeDasharray="4 2"
+                strokeLinecap="round"
+                opacity="0.95"
+                markerEnd="url(#arrowhead-threat)"
+                filter="drop-shadow(0 0 6px rgba(239,68,68,0.8))"
+              />
+            )}
+          </svg>
         </div>
       </div>
 
-      {/* Board Theme Quick Switcher */}
+      {/* Board & Piece Customization Bar */}
       <div className="w-full flex items-center justify-between px-1 text-xs text-slate-400">
-        <span className="text-[11px] font-mono">
-          Theme: <strong className="text-slate-200">{theme.name}</strong>
-        </span>
-        <button
-          onClick={cycleTheme}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 text-[11px] font-semibold transition"
-          title="Switch Board Theme (Green, Wood, Ice)"
-        >
-          <Palette className="h-3 w-3 text-emerald-400" />
-          <span>Change Theme</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={cycleTheme}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 text-[11px] font-semibold transition"
+            title="Switch Board Theme (Green, Wood, Ice)"
+          >
+            <Palette className="h-3 w-3 text-emerald-400" />
+            <span>{theme.name}</span>
+          </button>
+
+          <button
+            onClick={cyclePieceSet}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800 text-[11px] font-semibold transition"
+            title="Switch Piece Style (Staunton, Neo, Alpha, Staunty)"
+          >
+            <Sparkles className="h-3 w-3 text-cyan-400" />
+            <span>{PIECE_SET_NAMES[pieceSet]}</span>
+          </button>
+        </div>
+
+        {isRetrying && (
+          <span className="text-[11px] font-semibold text-amber-300 flex items-center gap-1 animate-pulse">
+            <HelpCircle className="h-3 w-3" />
+            Retry Mode Active
+          </span>
+        )}
       </div>
     </div>
   );

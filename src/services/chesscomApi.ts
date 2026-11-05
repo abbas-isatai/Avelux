@@ -181,3 +181,123 @@ function formatTimeControl(tc: string, timeClass: string): string {
   }
   return `${tc} ${timeClass}`;
 }
+
+/**
+ * Parses raw PGN text or fetches a game directly from a Chess.com or Lichess URL
+ */
+export async function fetchGameByUrlOrPgn(input: string): Promise<ChessComGame> {
+  const trimmed = input.trim();
+
+  // 1. Direct Lichess URL: e.g. https://lichess.org/AbCdEf12
+  const lichessMatch = trimmed.match(/lichess\.org\/([A-Za-z0-9]{8,12})/);
+  if (lichessMatch) {
+    const gameId = lichessMatch[1].slice(0, 8);
+    try {
+      const res = await fetch(`https://lichess.org/game/export/${gameId}?evals=0&clocks=0`, {
+        headers: { 'User-Agent': 'AveluxGrandChessReviewer/1.0' },
+      });
+      if (!res.ok) {
+        throw new Error(`Lichess game ${gameId} not found (HTTP ${res.status})`);
+      }
+      const pgn = await res.text();
+      return parsePgnToGame(pgn, `https://lichess.org/${gameId}`);
+    } catch (err) {
+      throw new Error(`Failed to load Lichess game: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // 2. Direct Chess.com URL: e.g. https://www.chess.com/game/live/108920192 or daily/12345
+  const chessComMatch = trimmed.match(/chess\.com\/(?:game\/|analysis\/game\/|live\/game\/)?(?:live|daily)?\/?([0-9]{7,14})/);
+  if (chessComMatch) {
+    const gameId = chessComMatch[1];
+    try {
+      // Step A: query Chess.com live callback
+      const callbackRes = await fetch(`https://www.chess.com/callback/live/game/${gameId}`, {
+        headers: { 'User-Agent': 'AveluxGrandChessReviewer/1.0' },
+      });
+      if (callbackRes.ok) {
+        const data = await callbackRes.json();
+        const whiteUser = data?.players?.bottom?.username || data?.players?.top?.username || '';
+        const rawDate = data?.game?.pgnHeaders?.Date || '';
+        const yearMonthMatch = rawDate.match(/^(\d{4})\.(\d{2})/);
+
+        if (whiteUser && yearMonthMatch) {
+          const [_, year, month] = yearMonthMatch;
+          const archiveRes = await fetch(`https://api.chess.com/pub/player/${encodeURIComponent(whiteUser.toLowerCase())}/games/${year}/${month}`);
+          if (archiveRes.ok) {
+            const archiveData = await archiveRes.json();
+            const found = (archiveData.games || []).find((g: { url: string; pgn?: string }) => g.url?.includes(gameId) || (g.pgn && g.pgn.includes(gameId)));
+            if (found && found.pgn) {
+              return {
+                id: `chesscom-${gameId}`,
+                url: found.url || `https://www.chess.com/game/live/${gameId}`,
+                pgn: found.pgn,
+                fen: found.fen,
+                timeControl: formatTimeControl(found.time_control, found.time_class),
+                timeClass: found.time_class || 'blitz',
+                rated: !!found.rated,
+                endTime: found.end_time || Date.now(),
+                dateStr: new Date((found.end_time || 0) * 1000).toLocaleDateString(),
+                white: {
+                  username: found.white?.username || 'White',
+                  rating: found.white?.rating || 1500,
+                  result: found.white?.result || 'win',
+                },
+                black: {
+                  username: found.black?.username || 'Black',
+                  rating: found.black?.rating || 1500,
+                  result: found.black?.result || 'resigned',
+                },
+              };
+            }
+          }
+        }
+      }
+    } catch {
+      // fall through to generic fallback
+    }
+  }
+
+  // 3. Raw PGN string
+  if (trimmed.includes('[Event ') || trimmed.match(/1\.\s*[a-zA-Z]/)) {
+    return parsePgnToGame(trimmed, 'Custom PGN Import');
+  }
+
+  throw new Error('Please enter a valid Chess.com URL, Lichess URL, or paste a standard PGN.');
+}
+
+function parsePgnToGame(pgn: string, url: string): ChessComGame {
+  const getTag = (tag: string, defaultVal: string): string => {
+    const m = pgn.match(new RegExp(`\\[${tag}\\s+"([^"]+)"\\]`, 'i'));
+    return m ? m[1] : defaultVal;
+  };
+
+  const whiteUser = getTag('White', 'White Player');
+  const blackUser = getTag('Black', 'Black Player');
+  const whiteElo = parseInt(getTag('WhiteElo', '1500'), 10) || 1500;
+  const blackElo = parseInt(getTag('BlackElo', '1500'), 10) || 1500;
+  const result = getTag('Result', '*');
+  const dateStr = getTag('Date', new Date().toISOString().slice(0, 10));
+  const timeControl = getTag('TimeControl', 'Standard');
+
+  return {
+    id: `import-${Date.now()}`,
+    url,
+    pgn,
+    timeControl,
+    timeClass: 'game',
+    rated: true,
+    endTime: Math.floor(Date.now() / 1000),
+    dateStr,
+    white: {
+      username: whiteUser,
+      rating: whiteElo,
+      result: result.startsWith('1-0') ? 'win' : result.startsWith('0-1') ? 'resigned' : 'draw',
+    },
+    black: {
+      username: blackUser,
+      rating: blackElo,
+      result: result.startsWith('0-1') ? 'win' : result.startsWith('1-0') ? 'resigned' : 'draw',
+    },
+  };
+}
