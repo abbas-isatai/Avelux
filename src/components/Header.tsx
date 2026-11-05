@@ -65,7 +65,7 @@ export const Header: React.FC<HeaderProps> = ({
         ) : (
           <div className="hidden md:flex items-center gap-1.5 text-xs text-slate-400">
             <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-            <span>0 CP = Best • &lt;15 CP Sacrifice = Brilliant • &gt;201 CP = Blunder</span>
+            <span>Best ⭐ • Brilliant !! • Great ! • Miss ✕ • Blunder ??</span>
           </div>
         )}
 

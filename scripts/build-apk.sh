@@ -224,7 +224,11 @@ aapt package -f \
 
 # Add classes.dex
 cd "$BUILD_DIR/bin"
-zip -uj unaligned.apk classes.dex
+if command -v zip >/dev/null 2>&1; then
+    zip -uj unaligned.apk classes.dex
+else
+    python3 -c "import zipfile; z = zipfile.ZipFile('unaligned.apk', 'a'); z.write('classes.dex', 'classes.dex'); z.close()"
+fi
 cd -
 
 # 11. 4-byte Zipalign

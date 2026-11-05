@@ -86,7 +86,7 @@ export default function App() {
         const move = reviewResult.moves[clamped - 1];
         if (move.classification === 'brilliant') {
           sounds.playBrilliant();
-        } else if (move.classification === 'blunder') {
+        } else if (move.classification === 'blunder' || move.classification === 'miss') {
           sounds.playBlunder();
         } else if (move.isCheck) {
           sounds.playCheck();
@@ -155,18 +155,26 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentPly, handleSelectPly]);
 
-  // Jump to next blunder or mistake
+  // Jump to next blunder, miss, or mistake
   const jumpToNextError = () => {
     if (!reviewResult) return;
     const moves = reviewResult.moves;
     for (let i = currentPly; i < moves.length; i++) {
-      if (moves[i].classification === 'blunder' || moves[i].classification === 'mistake') {
+      if (
+        moves[i].classification === 'blunder' ||
+        moves[i].classification === 'mistake' ||
+        moves[i].classification === 'miss'
+      ) {
         handleSelectPly(i + 1);
         return;
       }
     }
     for (let i = 0; i < currentPly; i++) {
-      if (moves[i].classification === 'blunder' || moves[i].classification === 'mistake') {
+      if (
+        moves[i].classification === 'blunder' ||
+        moves[i].classification === 'mistake' ||
+        moves[i].classification === 'miss'
+      ) {
         handleSelectPly(i + 1);
         return;
       }

@@ -414,22 +414,29 @@ class StockfishEngineService {
 
       const playedUci = move.from + move.to + (move.promotion || '');
 
-      // Realistic Centipawn Loss Calculation:
+      // Expected Points Model (Win Probability) based on Chess.com Game Review
+      const toWinProb = (scoreCp: number): number => {
+        return 1 / (1 + Math.pow(10, -scoreCp / 400));
+      };
+
+      const winBefore = toWinProb(scoreBeforePlayer);
+      const winAfter = toWinProb(scoreAfterPlayer);
+      const deltaW = Math.max(0, winBefore - winAfter);
+      const rawLoss = Math.max(0, scoreBeforePlayer - scoreAfterPlayer);
+
+      // Centipawn loss with realistic scaling so winning lines aren't penalized
       let cpLoss = 0;
       if (playedUci === bestMoveUci || move.san === bestMoveSan) {
         cpLoss = 0;
+      } else if (scoreAfterPlayer >= 250) {
+        // Winning by multiple pieces/pawns: scale by win probability drop
+        cpLoss = Math.min(Math.round(deltaW * 600), 75);
+      } else if (scoreBeforePlayer <= -400 && scoreAfterPlayer <= -400) {
+        // Already lost position: scale down noise
+        cpLoss = Math.min(Math.round(rawLoss * 0.25), 65);
       } else {
-        const rawLoss = scoreBeforePlayer - scoreAfterPlayer;
-
-        // If player is already winning decisively (>= +300 cp), damp loss so solid winning moves are not falsely called blunders
-        if (scoreAfterPlayer >= 300 && rawLoss > 0) {
-          cpLoss = Math.min(Math.round(rawLoss * 0.35), 75);
-        } else if (scoreBeforePlayer <= -400 && scoreAfterPlayer <= -400) {
-          // Game was already completely lost, avoid stacking artificial blunders
-          cpLoss = Math.min(Math.round(Math.max(0, rawLoss) * 0.3), 70);
-        } else {
-          cpLoss = Math.max(0, Math.round(rawLoss));
-        }
+        // Competitive position: accurate raw centipawn loss
+        cpLoss = Math.round(rawLoss);
       }
 
       const isCheckmate = chess.isGameOver();
@@ -444,27 +451,21 @@ class StockfishEngineService {
         isCheckmate
       );
 
-      // Classification per user prompt rules with realistic chess-review sensitivity:
-      // - under 15 and sacrifices a piece (Queen, Rook, Minor) -> brilliant (!!)
-      // - centipawn loss 0 and changes position greatly (huge swing / only save) -> great move (!)
-      // - centipawn loss 0 -> best move (★)
-      // - 1-15 -> excellent (✓)
-      // - 16-40 -> good (○)
-      // - 41-100 -> inaccuracy (?!)
-      // - 101-200 -> mistake (?)
-      // - >= 201 -> blunder (??)
-      // - early moves in book -> book (📖)
+      // Classification using Expected Points (Win Probability) & Tactical Context:
       let classification: MoveClassification = 'best';
 
       const isEarlyBook = i < 8 && OPENING_BOOK.has(playedUci);
 
+      // 1. Brilliant (!!): Authentic high-value piece sacrifice resulting in decisive win
       if (isSacrifice && cpLoss <= 10 && i >= 6) {
-        // Authentic, rare Brilliant move (!!)
         classification = 'brilliant';
-      } else if (isEarlyBook && cpLoss <= 15) {
+      }
+      // 2. Book (📖): Recognized opening theory
+      else if (isEarlyBook && (cpLoss <= 15 || deltaW <= 0.035)) {
         classification = 'book';
-      } else if (cpLoss === 0) {
-        // Great Move (!): Must change position greatly or be a critical turning point
+      }
+      // 3. Best (★) or Great (!): Engine's top move or minimal win probability loss
+      else if (playedUci === bestMoveUci || move.san === bestMoveSan || (cpLoss <= 2 && deltaW <= 0.005)) {
         const isGameWinningSwing = scoreBeforePlayer <= 60 && scoreAfterPlayer >= 200;
         const isGameSavingDefense = scoreBeforePlayer <= -220 && scoreAfterPlayer >= -30;
         const isEndgameBreakthrough = i > 40 && Math.abs(scoreBeforePlayer) <= 40 && scoreAfterPlayer >= 300;
@@ -474,16 +475,35 @@ class StockfishEngineService {
         } else {
           classification = 'best';
         }
-      } else if (cpLoss >= 1 && cpLoss <= 15) {
-        classification = 'excellent';
-      } else if (cpLoss >= 16 && cpLoss <= 40) {
-        classification = 'good';
-      } else if (cpLoss >= 41 && cpLoss <= 100) {
-        classification = 'inaccuracy';
-      } else if (cpLoss >= 101 && cpLoss <= 200) {
-        classification = 'mistake';
-      } else {
+      }
+      // 4. Miss (✕): Overlooked a winning tactical opportunity or failed to punish an opponent blunder
+      else if (scoreBeforePlayer >= 160 && (deltaW >= 0.12 || scoreAfterPlayer < 70) && rawLoss >= 100) {
+        classification = 'miss';
+      }
+      // 5. Blunder (??): Decisive game-altering error that flips or loses the game (20%+ win probability lost)
+      else if (
+        (deltaW >= 0.20 && (scoreAfterPlayer <= 30 || rawLoss >= 250)) ||
+        (scoreBeforePlayer >= 100 && scoreAfterPlayer <= -150) ||
+        (scoreBeforePlayer >= -50 && scoreAfterPlayer <= -250) ||
+        (rawLoss >= 300 && scoreAfterPlayer < 180)
+      ) {
         classification = 'blunder';
+      }
+      // 6. Mistake (?): Significant error conceding clear advantage (10% to 20% win chance lost)
+      else if (deltaW >= 0.10 || (rawLoss >= 110 && scoreAfterPlayer < 180)) {
+        classification = 'mistake';
+      }
+      // 7. Inaccuracy (?!): Minor slip (4% to 10% win chance lost)
+      else if (deltaW >= 0.04 || (rawLoss >= 45 && cpLoss >= 40)) {
+        classification = 'inaccuracy';
+      }
+      // 8. Good (○): Solid, reasonable move (1.5% to 4% win chance lost)
+      else if (deltaW >= 0.015 || cpLoss >= 16) {
+        classification = 'good';
+      }
+      // 9. Excellent (✓): Practically as strong as top move (< 1.5% win chance lost)
+      else {
+        classification = 'excellent';
       }
 
       const review: MoveReview = {
@@ -541,6 +561,7 @@ class StockfishEngineService {
       good: 0,
       inaccuracy: 0,
       mistake: 0,
+      miss: 0,
       blunder: 0,
       book: 0,
       avgCpLoss: 0,

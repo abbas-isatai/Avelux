@@ -6,6 +6,7 @@ export type MoveClassification =
   | 'good'
   | 'inaccuracy'
   | 'mistake'
+  | 'miss'
   | 'blunder'
   | 'book';
 
@@ -46,6 +47,7 @@ export interface GameStats {
   good: number;
   inaccuracy: number;
   mistake: number;
+  miss: number;
   blunder: number;
   book: number;
   avgCpLoss: number;
@@ -168,7 +170,18 @@ export const CLASSIFICATIONS_CONFIG: Record<MoveClassification, ClassificationMe
     borderColor: 'border-orange-400',
     textColor: 'text-orange-300',
     glowColor: 'shadow-[0_0_12px_rgba(249,115,22,0.5)]',
-    description: 'Significantly weakens position (101-200 CP loss)',
+    description: 'Significantly weakens position (10-20% win chance lost)',
+  },
+  miss: {
+    type: 'miss',
+    label: 'Miss',
+    symbol: '✕',
+    color: '#F43F5E', // Rose / Crimson
+    bgColor: 'bg-rose-500/20',
+    borderColor: 'border-rose-400',
+    textColor: 'text-rose-300',
+    glowColor: 'shadow-[0_0_12px_rgba(244,63,94,0.5)]',
+    description: 'Overlooked a tactical win or failed to punish an opponent blunder',
   },
   blunder: {
     type: 'blunder',
@@ -179,7 +192,7 @@ export const CLASSIFICATIONS_CONFIG: Record<MoveClassification, ClassificationMe
     borderColor: 'border-red-500',
     textColor: 'text-red-400',
     glowColor: 'shadow-[0_0_15px_rgba(239,68,68,0.6)]',
-    description: 'Game-altering error (201+ CP loss)',
+    description: 'Game-altering error that flips or loses the game',
   },
   book: {
     type: 'book',

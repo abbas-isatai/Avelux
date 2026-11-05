@@ -420,6 +420,7 @@ export const GameReviewPanel: React.FC<GameReviewPanelProps> = ({
                   'good',
                   'inaccuracy',
                   'mistake',
+                  'miss',
                   'blunder',
                   'book',
                 ] as MoveClassification[]
