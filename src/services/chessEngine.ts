@@ -251,40 +251,68 @@ class StockfishEngineService {
   }
 
   /**
-   * Detects if a move was a sacrifice for tactical or positional advantage
+   * Detects if a move was a genuine high-value sacrifice for tactical or positional advantage:
+   * e.g., Queen, Rook, or Minor piece sacrificed for a decisive win or checkmate.
    */
   private checkIsSacrifice(
     chessBefore: Chess,
     move: { from: Square; to: Square; piece: PieceSymbol; captured?: PieceSymbol; san: string },
+    evalBeforePlayer: number,
     evalAfterPlayer: number,
-    cpLoss: number
+    cpLoss: number,
+    isCheckmate: boolean
   ): boolean {
+    // 1. Must satisfy user prompt requirement: cpLoss < 15
+    if (cpLoss >= 15) return false;
+
+    // 2. Must not ruin the position - player must be winning or deliver mate
+    // evalAfterPlayer must be decisive (at least +150 cp, or checkmate, or mate sequence)
+    if (evalAfterPlayer < 150 && !isCheckmate) return false;
+
     const pieceVal = PIECE_VALUES[move.piece];
     const capturedVal = move.captured ? PIECE_VALUES[move.captured] : 0;
 
-    // Must satisfy user prompt rule: under 15 cp loss
-    if (cpLoss >= 15) return false;
-    // Must not ruin the game (evaluation remains competitive >= -80 cp or mate)
-    if (evalAfterPlayer < -80) return false;
-
-    // Queen (900) traded for Rook (500) or minor (320) or pawn (100)
-    if (pieceVal === 900 && capturedVal <= 500) {
-      return true;
+    // Only Queen, Rook, Bishop, or Knight can be sacrificed (pawns alone do not count)
+    if (move.piece !== 'q' && move.piece !== 'r' && move.piece !== 'b' && move.piece !== 'n') {
+      return false;
     }
 
-    // Rook (500) traded for minor (320) or pawn (100) or open file sacrifice
-    if (pieceVal === 500 && capturedVal <= 320) {
-      return true;
+    // 3. Material traded down on this move:
+    const netMaterialGiven = pieceVal - capturedVal;
+
+    // Simulate position after the move to see if the piece is actually en prise (capturable)
+    const sim = new Chess(chessBefore.fen());
+    sim.move(move);
+    const opponentMoves = sim.moves({ verbose: true });
+    const isTargetAttacked = opponentMoves.some((m) => m.to === move.to);
+
+    // Case A: Queen sacrifice (gives up 900 for <= 500, or queen placed where it can be taken)
+    if (move.piece === 'q') {
+      // Queen captures lower piece (e.g. rook, minor, pawn) and is attacked, or moves to attacked square without capture
+      if (netMaterialGiven >= 400 && isTargetAttacked) {
+        return true;
+      }
+      // Or Queen was given up for forced mate sequence
+      if ((isCheckmate || evalAfterPlayer > 8000) && isTargetAttacked && netMaterialGiven > 0) {
+        return true;
+      }
     }
 
-    // Minor piece (Knight/Bishop 320-330) given up for Pawn or nothing
-    if ((pieceVal === 320 || pieceVal === 330) && capturedVal <= 100) {
-      // Check if square is attacked by opponent
-      const sim = new Chess(chessBefore.fen());
-      sim.move(move);
-      const opponentMoves = sim.moves({ verbose: true });
-      const canBeTaken = opponentMoves.some((m) => m.to === move.to);
-      if (canBeTaken) return true;
+    // Case B: Rook sacrifice (gives up 500 for minor piece (320), pawn (100) or nothing (0))
+    if (move.piece === 'r') {
+      if (netMaterialGiven >= 170 && isTargetAttacked) {
+        return true;
+      }
+    }
+
+    // Case C: Minor piece sacrifice (Knight or Bishop gives up 320 for pawn (100) or nothing (0))
+    if (move.piece === 'b' || move.piece === 'n') {
+      if (netMaterialGiven >= 200 && isTargetAttacked) {
+        // Minor piece sacrifice must result in a decisive advantage (>= +220) or mate
+        if (evalAfterPlayer >= 220 || isCheckmate) {
+          return true;
+        }
+      }
     }
 
     return false;
@@ -368,17 +396,21 @@ class StockfishEngineService {
         cpLoss = Math.max(0, Math.round(loss));
       }
 
-      // Detect Piece Sacrifices
+      const isCheckmate = chess.isGameOver();
+
+      // Detect Authentic Piece Sacrifices (Queen, Rook, or Minor for winning attack/mate)
       const isSacrifice = this.checkIsSacrifice(
         new Chess(fenBefore),
         { from: move.from, to: move.to, piece: move.piece, captured: move.captured, san: move.san },
+        scoreBeforePlayer,
         scoreAfterPlayer,
-        cpLoss
+        cpLoss,
+        isCheckmate
       );
 
-      // Classification exactly per user prompt specifications:
-      // - under 15 and sacrifices a piece -> brilliant (!!)
-      // - centipawn loss 0 and didn't completely ruin the game -> great move (!)
+      // Classification exactly per user specifications and strict rarity rules:
+      // - under 15 and sacrifices a piece (Queen, Rook, Minor) -> brilliant (!!)
+      // - centipawn loss 0 and changes position greatly (huge swing / only save) -> great move (!)
       // - centipawn loss 0 -> best move (★)
       // - 1-15 -> excellent (✓)
       // - 16-40 -> good (○)
@@ -388,19 +420,26 @@ class StockfishEngineService {
       // - early moves in book -> book (📖)
       let classification: MoveClassification = 'best';
 
-      const isEarlyBook = i < 6 && OPENING_BOOK.has(playedUci);
+      const isEarlyBook = i < 8 && OPENING_BOOK.has(playedUci);
 
-      if (isSacrifice && cpLoss < 15) {
+      if (isSacrifice && cpLoss < 15 && i >= 6) {
+        // Authentic, rare Brilliant move (!!)
         classification = 'brilliant';
-      } else if (isEarlyBook && cpLoss <= 10) {
+      } else if (isEarlyBook && cpLoss <= 15) {
         classification = 'book';
       } else if (cpLoss === 0) {
-        // Distinguish Great vs Best:
-        // A Great move is an extraordinary only-move / defensive stand / tactical finding
-        const isTenseOrCritical = chess.isCheck() || Math.abs(scoreBeforePlayer) > 200 || i > 15;
-        if (isTenseOrCritical && scoreAfterPlayer >= -50) {
+        // Great Move (!): Must change position greatly or be a critical turning point
+        // 1. Massive swing from equal/losing to decisive winning:
+        const isGameWinningSwing = scoreBeforePlayer <= 60 && scoreAfterPlayer >= 200;
+        // 2. Finding the sole miraculous defensive hold from a dead lost position:
+        const isGameSavingDefense = scoreBeforePlayer <= -220 && scoreAfterPlayer >= -30;
+        // 3. Finding an endgame breakthrough turning a draw (<= 40) into a forced win (>= 300):
+        const isEndgameBreakthrough = i > 40 && Math.abs(scoreBeforePlayer) <= 40 && scoreAfterPlayer >= 300;
+
+        if (i > 8 && (isGameWinningSwing || isGameSavingDefense || isEndgameBreakthrough)) {
           classification = 'great';
         } else {
+          // Standard optimal Stockfish 19 choice
           classification = 'best';
         }
       } else if (cpLoss >= 1 && cpLoss <= 15) {

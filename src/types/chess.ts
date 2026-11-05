@@ -102,7 +102,7 @@ export const CLASSIFICATIONS_CONFIG: Record<MoveClassification, ClassificationMe
     borderColor: 'border-cyan-400',
     textColor: 'text-cyan-300',
     glowColor: 'shadow-[0_0_15px_rgba(6,182,212,0.6)]',
-    description: 'A daring sacrifice that keeps the advantage (CP loss < 15)',
+    description: 'A genuine high-value piece sacrifice leading to decisive advantage or mate (CP loss < 15)',
   },
   great: {
     type: 'great',
@@ -113,7 +113,7 @@ export const CLASSIFICATIONS_CONFIG: Record<MoveClassification, ClassificationMe
     borderColor: 'border-indigo-400',
     textColor: 'text-indigo-300',
     glowColor: 'shadow-[0_0_15px_rgba(129,140,248,0.5)]',
-    description: 'An optimal 0 CP loss move in a critical position',
+    description: 'A major turning point or sole game-saving resource (0 CP loss)',
   },
   best: {
     type: 'best',
